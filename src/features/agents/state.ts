@@ -53,6 +53,8 @@ export function isAgentKey(key: string) {
     key === TEAM_MOVES_KEY ||
     // The device-wide defaults that blank agent settings inherit.
     key === "buzz.claude-code.provider-defaults.v1" ||
+    // How Claude signs in: an API key or a Claude account.
+    key === "buzz.claude-code.auth-method.v1" ||
     key === "buzz.codex.provider-defaults.v1" ||
     // TEMPORARY agents rename: see migrate-storage.ts.
     key.startsWith("buzz.agents2.")

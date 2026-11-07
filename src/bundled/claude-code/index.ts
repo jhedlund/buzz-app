@@ -12,6 +12,7 @@ import { refusedByBuzz } from "./auth";
 import type { PluginModule } from "../../plugins/api";
 import { ClaudeLogoIcon } from "../../shared/design-system/icons";
 import { claudeRun, TYPE_ID } from "./run";
+import { ClaudeAuth } from "./auth";
 import { ClaudeDefaults } from "./defaults";
 import { ClaudeRuntime, type Config, config, DEFAULT_CONFIG } from "./runtime";
 import { ClaudeSetup, withScript } from "./setup";
@@ -31,7 +32,11 @@ export const apply: PluginModule["apply"] = (ctx) => {
   const typeKey = `${ctx.pluginOwner?.id ?? "buzz.claude-code"}/${TYPE_ID}`;
   const spawn = host.spawn && withScript(host.spawn.bind(host));
   const readFile = host.readFile?.bind(host);
-  const setup = new ClaudeSetup(spawn, (input) => host.request(input));
+  const setup = new ClaudeSetup(
+    spawn,
+    (input) => host.request(input),
+    new ClaudeAuth(spawn, agents.storage),
+  );
   ctx.agentProtection.registerModels({
     label: "Claude",
     models: async () =>
@@ -218,11 +223,10 @@ export const apply: PluginModule["apply"] = (ctx) => {
       get attentionAction() {
         const state = setup.snapshot();
         if (state.running) return undefined;
+        // Signed out, configuration opens: it offers each way to sign in.
         return state.status?.state === "outdated"
           ? () => void setup.run("install")
-          : state.status?.state === "signed-out" && setup.auth.signIn
-            ? () => void setup.run("sign-in")
-            : undefined;
+          : undefined;
       },
       DialogBody: ProviderDialogBody,
       DefaultControl,

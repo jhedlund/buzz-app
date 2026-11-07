@@ -1010,7 +1010,7 @@ it("asks for an API key and is ready once one is saved", async () => {
   // The key's form takes the dialog over, saying once is enough.
   expect(
     await screen.findByText(
-      "Claude requires an API key to connect to your account. Create one at console.anthropic.com and paste it below. You only have to set this up once, and Buzz keeps it securely on this computer.",
+      "Sign in with your Claude account (Pro, Max, Team or Enterprise), or create an API key at console.anthropic.com and paste it below. You only have to set this up once, and Buzz keeps the key securely on this computer.",
     ),
   ).toBeVisible();
   expect(
@@ -1093,16 +1093,25 @@ it("replaces generic installation copy with the latest installer state", async (
   expect(screen.queryByLabelText("Setup output")).toBeNull();
 });
 
-it("opens its dialog for a missing key rather than running a step", async () => {
-  const { type } = installed({ keySaved: false });
-  await waitFor(() =>
-    expect(type.provider?.snapshot()).toMatchObject({
-      readiness: "attention",
-      attentionLabel: "Add Claude API key",
-    }),
-  );
-  expect(type.provider?.attentionAction).toBeUndefined();
-});
+it.each([false, true])(
+  "opens its dialog for a missing key rather than running a step, with a sign-in step: %s",
+  async (signIn) => {
+    interactive.signIn = signIn;
+    try {
+      const { type } = installed({ keySaved: false });
+      await waitFor(() =>
+        expect(type.provider?.snapshot()).toMatchObject({
+          readiness: "attention",
+          attentionLabel: "Add Claude API key",
+        }),
+      );
+      // The dialog offers the key as well as the sign-in.
+      expect(type.provider?.attentionAction).toBeUndefined();
+    } finally {
+      interactive.signIn = false;
+    }
+  },
+);
 
 it("leaves a missing copy to the provider dialog", async () => {
   // Without an attention action, Settings' Harness defaults row opens
@@ -1817,7 +1826,7 @@ it("offers Set up Claude beside Harness when Claude is picked, then its models",
   const dialog = await screen.findByRole("dialog", { name: "Set up Claude" });
   expect(
     within(dialog).getByText(
-      "Claude requires an API key to connect to your account. Create one at console.anthropic.com and paste it below. You only have to set this up once, and Buzz keeps it securely on this computer.",
+      "Sign in with your Claude account (Pro, Max, Team or Enterprise), or create an API key at console.anthropic.com and paste it below. You only have to set this up once, and Buzz keeps the key securely on this computer.",
     ),
   ).toBeVisible();
   expect(within(dialog).queryByRole("button", { name: "Sign in" })).toBeNull();
@@ -1885,7 +1894,10 @@ it("offers an interactive sign-in in Set up Claude when the build has one", asyn
     expect(open).toHaveTextContent("Sign in");
     await user.click(open);
     const dialog = await screen.findByRole("dialog", { name: "Set up Claude" });
-    await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    const signIn = within(dialog).getByRole("button", { name: "Sign in" });
+    // Enabled once the first check, which also asks for an account, ends.
+    await waitFor(() => expect(signIn).toBeEnabled());
+    await user.click(signIn);
     await waitFor(() =>
       expect(
         screen.queryByRole("dialog", { name: "Set up Claude" }),
@@ -2069,9 +2081,7 @@ it("sends a library card without a key to Claude's setup in Settings", async () 
       onChange={vi.fn()}
     />,
   );
-  expect(
-    await screen.findByText(/Claude is missing an API key\./),
-  ).toBeVisible();
+  expect(await screen.findByText(/Claude is not set up\./)).toBeVisible();
   expect(screen.queryByLabelText("Anthropic API key")).toBeNull();
   await userEvent
     .setup()
