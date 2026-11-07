@@ -10,7 +10,12 @@
 // names and shapes when changing it. The optional ClaudeAuth.Settings surface
 // belongs to this authentication method; other implementations may omit it.
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { type ComponentType, useEffect, useState } from "react";
+import {
+  type ComponentType,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ApiKeyForm } from "../../features/settings/ApiKeyForm";
 import { Button } from "../../shared/design-system/ui/Button";
@@ -507,7 +512,7 @@ export function Missing({
 
 function KeyForm({
   setup,
-  disabled = false,
+  disabled: off = false,
   replace = false,
   onSaved,
   active = () => true,
@@ -524,6 +529,10 @@ function KeyForm({
   const [saving, setSaving] = useState<AbortController>();
   // Kept until the form closes.
   const [saved, setSaved] = useState<{ ok: boolean; text: string }>();
+  // A sign-in under way would choose the account after a key saved now.
+  const signingIn =
+    useSyncExternalStore(setup.subscribe, setup.snapshot).running === "sign-in";
+  const disabled = off || signingIn;
   // Closing the form cancels a save.
   useEffect(() => () => saving?.abort(), [saving]);
   const save = async () => {
