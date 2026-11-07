@@ -1912,7 +1912,7 @@ it("offers an interactive sign-in in Set up Claude when the build has one", asyn
   }
 });
 
-it("stops a sign-in still running when Set up Claude closes", async () => {
+it("stops a sign-in still running when Set up Claude closes, and holds the key form meanwhile", async () => {
   interactive.signIn = true;
   let release = () => {};
   interactive.hold = new Promise<void>((resolve) => {
@@ -1929,12 +1929,18 @@ it("stops a sign-in still running when Set up Claude closes", async () => {
       await screen.findByRole("button", { name: "Add Claude API key" }),
     );
     const dialog = await screen.findByRole("dialog", { name: "Set up Claude" });
-    await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    const signIn = within(dialog).getByRole("button", { name: "Sign in" });
+    await waitFor(() => expect(signIn).toBeEnabled());
+    await user.click(signIn);
     await waitFor(() =>
       expect(
         within(dialog).queryByRole("button", { name: "Sign in" }),
       ).toBeNull(),
     );
+    // A key saved now would be overwritten when the sign-in ends.
+    expect(
+      within(dialog).getByRole("button", { name: "Save key" }),
+    ).toHaveAttribute("aria-disabled", "true");
     expect(cancel).not.toHaveBeenCalled();
     await user.keyboard("{Escape}");
     await waitFor(() =>
@@ -1967,7 +1973,9 @@ it("restores pending sign-in controls after unmount and can cancel and retry", a
       await screen.findByRole("button", { name: "Add Claude API key" }),
     );
     let dialog = await screen.findByRole("dialog", { name: "Set up Claude" });
-    await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    const first = within(dialog).getByRole("button", { name: "Sign in" });
+    await waitFor(() => expect(first).toBeEnabled());
+    await user.click(first);
     const signIns = () =>
       spawn.mock.calls.filter(
         ([, options]) => options?.args?.slice(-2).join(" ") === "auth login",
@@ -1993,9 +2001,12 @@ it("restores pending sign-in controls after unmount and can cancel and retry", a
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await process.exited;
     expect(kill).toHaveBeenCalledTimes(1);
-    await user.click(
-      await within(dialog).findByRole("button", { name: "Sign in" }),
-    );
+    const retry = await within(dialog).findByRole("button", {
+      name: "Sign in",
+    });
+    // Enabled once the check after the cancelled sign-in ends.
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.click(retry);
     await waitFor(() => expect(signIns()).toHaveLength(2));
     const secondIndex = spawn.mock.calls.findIndex(
       ([, options], next) =>

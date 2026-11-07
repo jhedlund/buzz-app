@@ -9,7 +9,7 @@
 // of the plugin reaches authentication only through its exports: keep their
 // names and shapes when changing it.
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Button } from "../../shared/design-system/ui/Button";
 import { Field } from "../../shared/design-system/ui/Field";
 import { Input } from "../../shared/design-system/ui/Input";
@@ -472,7 +472,7 @@ export function Missing({
 
 function KeyForm({
   setup,
-  disabled = false,
+  disabled: off = false,
   compact = false,
   replace = false,
   onSaved,
@@ -487,6 +487,10 @@ function KeyForm({
   const [saving, setSaving] = useState<AbortController>();
   // Kept until the form closes.
   const [saved, setSaved] = useState<{ ok: boolean; text: string }>();
+  // A sign-in under way would choose the account after a key saved now.
+  const signingIn =
+    useSyncExternalStore(setup.subscribe, setup.snapshot).running === "sign-in";
+  const disabled = off || signingIn;
   // Closing the form cancels a save.
   useEffect(() => () => saving?.abort(), [saving]);
   const save = async () => {
