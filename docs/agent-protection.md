@@ -211,7 +211,9 @@ read the key from their environment. Buzz does not set Claude's
 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, which would also strip `SSH_AUTH_SOCK`,
 `GIT_*` and every `*TOKEN` and `*KEY` variable. Keeping the key out of the
 app's web view is the Claude plugin's own rule, not one native code enforces;
-native code only refuses the key to other plugins and processes. Until a key is saved, and once
+native code only refuses the key to other plugins and processes. Reviews use the
+key even when Claude agents run on a Claude account, as the review's own folder
+holds no account sign-in. Until a key is saved, and once
 Anthropic rejects it, Claude reviews fail closed; save a working key or choose
 another review model. A review's 60-second budget includes
 waiting for Buzz to download that release the first time; a longer download

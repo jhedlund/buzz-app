@@ -109,7 +109,14 @@ it("adds, confirms removal, and adds again without an installed runtime", async 
   const { spawn } = fixture();
   const add = await screen.findByLabelText("Anthropic API key");
   await waitFor(() => expect(add).not.toHaveAttribute("aria-disabled"));
-  expect(spawn).not.toHaveBeenCalled();
+  // Only the lookup for a Claude account, which needs no key.
+  expect(
+    vi
+      .mocked(spawn)
+      .mock.calls.every(
+        ([, options]) => options?.args?.join(" ") === "auth status --json",
+      ),
+  ).toBe(true);
   await user.type(add, "sk-ant-first");
   await user.click(screen.getByRole("button", { name: "Save" }));
   await savedKey();
