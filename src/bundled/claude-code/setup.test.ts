@@ -303,7 +303,7 @@ it("reports the version and whether an API key is saved", async () => {
   await signedOutSetup.check();
   expect(signedOutSetup.providerSnapshot()).toEqual({
     readiness: "attention",
-    attentionLabel: "Add Claude API key",
+    attentionLabel: "Sign in to Claude",
   });
   nativeKey.saved = true;
   const ready = scripted({

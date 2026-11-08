@@ -13,12 +13,15 @@ const state = vi.hoisted(() => ({
   asked: 0,
   saves: [] as string[],
   refusals: [] as string[],
+  /** Secure storage refuses to say whether a key is saved. */
+  unreadable: false,
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   invoke: async (command: string, args?: { value: string }) => {
     if (command === "claude_api_key_status") {
       state.asked += 1;
+      if (state.unreadable) throw "Secure storage is unavailable";
       return state.saved;
     }
     if (command !== "claude_api_key_set" || !args) return null;
@@ -31,7 +34,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 /** Starts with a key saved or not. */
 function store(saved = true) {
-  Object.assign(state, { saved, asked: 0, saves: [], refusals: [] });
+  Object.assign(state, {
+    saved,
+    asked: 0,
+    saves: [],
+    refusals: [],
+    unreadable: false,
+  });
 }
 beforeEach(() => void store());
 
@@ -351,6 +360,17 @@ it("finds an account signed in from a terminal after a check found none", async 
   account.loggedIn = true;
   await auth.authorize(spawn, true)("claude", { env: ENV });
   expect(started.at(-1)).toEqual({ id: "claude", options: { env: ENV } });
+});
+
+it("runs on the chosen account when secure storage can't be read, but not on the key", async () => {
+  const { spawn } = host({ loggedIn: true, email: "me@example.org" });
+  store(false);
+  state.unreadable = true;
+  const values = new Map<string, string>();
+  const auth = new ClaudeAuth(spawn, storage(values));
+  await expect(auth.check()).rejects.toThrow();
+  await auth.use("account");
+  await expect(auth.check()).resolves.toEqual({ account: "me@example.org" });
 });
 
 it("offers the saved key once the account's sign-in lapses", async () => {

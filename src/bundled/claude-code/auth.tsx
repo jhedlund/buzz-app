@@ -115,11 +115,10 @@ export class ClaudeAuth {
     this.store = spawn ? nativeStore() : undefined;
   }
 
-  /** What the agent type's row asks for while Claude cannot run. */
+  /** What the agent type's row asks for while Claude cannot run. It names
+   * the "Sign in" or "Add key" button beside Harness, so it follows `signIn`. */
   get attentionLabel() {
-    return this.found.method === "account"
-      ? "Sign in to Claude"
-      : "Add Claude API key";
+    return this.signIn ? "Sign in to Claude" : "Add Claude API key";
   }
   /** Ends "Claude 2.1.0 …" while Claude cannot run. */
   get needs() {
@@ -233,7 +232,11 @@ export class ClaudeAuth {
       const changes = this.changes;
       this.saved = undefined;
       const chosen = await this.chosen();
-      const key = await this.has();
+      // The account doesn't need the key store, so a refused one can't stop it.
+      const key = await this.has().catch((error: unknown) => {
+        if (chosen === "account") return false;
+        throw error;
+      });
       // The account matters only when Claude may use it: chosen, or, until
       // the owner chooses, when no key is saved, as Claude ran before keys.
       const account =

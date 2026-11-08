@@ -684,6 +684,17 @@ export function createTabs({
                 </Button>
               </div>
             )}
+            {/* Where `claude auth login` prints its link when no browser
+             * opens, and why a sign-in failed. */}
+            {state.output && state.running !== "install" && (
+              <div
+                role="log"
+                aria-label="Setup output"
+                className="m-0 max-h-60 overflow-auto whitespace-pre-wrap text-body-sm text-subtle"
+              >
+                {state.output}
+              </div>
+            )}
             {signingIn && <SignInCode setup={setup} />}
             <SignIn setup={setup} disabled={disabled} />
           </div>
