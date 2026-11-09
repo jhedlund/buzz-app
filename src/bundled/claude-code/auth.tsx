@@ -193,8 +193,12 @@ export class ClaudeAuth {
       };
       if (!status.loggedIn || /api.?key/i.test(status.authMethod ?? ""))
         return undefined;
+      // A personal account's organization is "<email>'s Organization".
+      const personal = status.email && status.orgName?.includes(status.email);
       return {
-        label: [status.email, status.orgName].filter(Boolean).join(" · "),
+        label: [status.email, !personal && status.orgName]
+          .filter(Boolean)
+          .join(" · "),
       };
     } catch {
       return undefined;

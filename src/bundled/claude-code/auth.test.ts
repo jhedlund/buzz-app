@@ -47,7 +47,12 @@ beforeEach(() => void store());
 /** A host whose `claude.sh review` prints a review folder and whose
  * `claude auth status` reports `account`; every start is recorded. */
 function host(
-  account: { loggedIn: boolean; authMethod?: string; email?: string } = {
+  account: {
+    loggedIn: boolean;
+    authMethod?: string;
+    email?: string;
+    orgName?: string;
+  } = {
     loggedIn: false,
   },
 ) {
@@ -371,6 +376,26 @@ it("runs on the chosen account when secure storage can't be read, but not on the
   await expect(auth.check()).rejects.toThrow();
   await auth.use("account");
   await expect(auth.check()).resolves.toEqual({ account: "me@example.org" });
+});
+
+it("names the account's organization only when it isn't the personal one", async () => {
+  store(false);
+  const team = host({
+    loggedIn: true,
+    email: "me@example.org",
+    orgName: "Acme",
+  });
+  await expect(new ClaudeAuth(team.spawn, storage()).check()).resolves.toEqual({
+    account: "me@example.org · Acme",
+  });
+  const personal = host({
+    loggedIn: true,
+    email: "me@example.org",
+    orgName: "me@example.org's Organization",
+  });
+  await expect(
+    new ClaudeAuth(personal.spawn, storage()).check(),
+  ).resolves.toEqual({ account: "me@example.org" });
 });
 
 it("offers the saved key once the account's sign-in lapses", async () => {
