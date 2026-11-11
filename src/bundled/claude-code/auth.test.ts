@@ -268,13 +268,20 @@ it("uses a saved key until the owner picks the account, and the key again once o
 });
 
 it("signs in as setup's step, then uses the account, but not once cancelled", async () => {
-  const { spawn } = host({ loggedIn: true });
+  const { spawn } = host();
   const auth = new ClaudeAuth(spawn, storage());
   const step = vi.fn(async () => undefined);
   await auth.signIn?.(step);
   expect(step.mock.calls).toEqual([["claude", ["auth", "login"], "Sign-in"]]);
   await auth.check();
   expect(auth.found.method).toBe("account");
+  // Claude Code already signed in, as from a terminal: no browser sign-in.
+  const signedIn = host({ loggedIn: true, email: "me@example.org" });
+  const reused = new ClaudeAuth(signedIn.spawn, storage());
+  const unused = vi.fn(async () => undefined);
+  await reused.signIn?.(unused);
+  expect(unused).not.toHaveBeenCalled();
+  await expect(reused.check()).resolves.toEqual({ account: "me@example.org" });
   // A cancelled step throws, as setup's does, and the choice stays.
   const other = new ClaudeAuth(spawn, storage());
   await expect(

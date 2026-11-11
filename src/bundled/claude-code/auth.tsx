@@ -127,12 +127,13 @@ export class ClaudeAuth {
       : "needs an Anthropic API key";
   }
 
-  /** Signs in to the Claude account as setup's step, which setup can
-   * cancel, and uses it from then on. */
+  /** Uses the Claude account from then on, signing in first, as setup's
+   * step, which setup can cancel, only when Claude Code isn't already. */
   readonly signIn: ((step: Step) => Promise<void>) | undefined = async (
     step,
   ) => {
-    await step("claude", ["auth", "login"], "Sign-in");
+    if (!(await this.account()))
+      await step("claude", ["auth", "login"], "Sign-in");
     await this.use("account");
   };
 
