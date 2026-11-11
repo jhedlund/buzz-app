@@ -1,0 +1,31 @@
+import type { PluginModule } from "../../plugins/api";
+import { ThreadsPage } from "./ThreadsPage";
+
+export const inject = ["pages", "relay", "navigation", "shortcuts"];
+export const apply: PluginModule["apply"] = (ctx) => {
+  const relay = ctx.relay;
+  const navigator = ctx.navigation;
+  // Activity owns Cmd+Shift+T (its threads filter).
+  ctx.shortcuts.register({
+    id: "open-threads-page",
+    title: "Open Threads",
+    binding: { key: "h", mod: true, shift: true },
+    order: 10,
+    allowInEditable: true,
+    run: () => {
+      void navigator.open({
+        version: 1,
+        kind: "page",
+        pluginId: "buzz.threads",
+        pageId: "threads",
+      });
+    },
+  });
+  ctx.pages.register({
+    id: "threads",
+    title: "Threads",
+    layout: "workspace",
+    primary: true,
+    component: () => <ThreadsPage relay={relay} navigator={navigator} />,
+  });
+};
