@@ -849,3 +849,86 @@ it("never hard-links a file a link swapped in for the copy points to", async () 
   expect((await stat(checker)).nlink).toBe(1);
   expect((await lstat(copy)).isSymbolicLink()).toBe(true);
 });
+
+/** Git for Windows, as codex.sh sees it: its `uname`, and `codex.exe`
+ * releases. Its `ln` refuses links unless `links`, as Windows does without
+ * Developer Mode. */
+async function windows(links: boolean) {
+  const f = await disk([]);
+  // Where codex.sh keeps releases off macOS, whatever this computer is.
+  const dir = join(f.home, ".local/share/buzz/codex");
+  const bin = join(f.home, "bin");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "uname"),
+    '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo MINGW64_NT-10.0-26100\n',
+  );
+  await chmod(join(bin, "uname"), 0o755);
+  /** Windows without Developer Mode, from now on. */
+  const refuseLinks = async () => {
+    await writeFile(
+      join(bin, "ln"),
+      '#!/bin/sh\ncase "$1" in -s*) echo "Operation not permitted" >&2; exit 1 ;; esac\nexec /bin/ln "$@"\n',
+    );
+    await chmod(join(bin, "ln"), 0o755);
+  };
+  if (!links) await refuseLinks();
+  const binary = join(dir, "0.1.0/bin/codex.exe");
+  await mkdir(dirname(binary), { recursive: true });
+  await writeFile(binary, '#!/bin/sh\nprintf "%s\\n" "$CODEX_HOME" "$@"\n');
+  await chmod(binary, 0o755);
+  await writeFile(join(dir, "current"), "0.1.0");
+  const step = (...args: string[]) =>
+    run("bash", ["-c", script, "codex.sh", ...args], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: f.home },
+    });
+  return {
+    ...f,
+    step,
+    refuseLinks,
+    dir,
+    own: `${dir}-home`,
+    codex: join(f.home, ".codex"),
+  };
+}
+
+it("runs codex.exe in Buzz's own home under Git for Windows", async () => {
+  const f = await windows(true);
+  const { stdout, stderr } = await f.step("run", "app-server");
+  expect(stdout.trim().split("\n")).toEqual([
+    f.own,
+    "-c",
+    `sqlite_home=${f.own}`,
+    "app-server",
+  ]);
+  expect(stderr).toBe("");
+  for (const name of shared)
+    expect(await readlink(join(f.own, name))).toBe(join(f.codex, name));
+});
+
+it("runs Codex in the shared home, and says so, when Windows makes no links", async () => {
+  const f = await windows(false);
+  const { stdout, stderr } = await f.step("run", "app-server");
+  expect(stdout.trim().split("\n")).toEqual([
+    f.codex,
+    "-c",
+    `sqlite_home=${f.codex}`,
+    "app-server",
+  ]);
+  expect(stderr).toContain("Buzz's Codex shares your Codex home");
+  // Signing in happens there too; reviews need links.
+  expect((await f.step("login")).stdout.trim().split("\n")).toEqual([
+    f.codex,
+    "login",
+  ]);
+  await expect(f.step("review")).rejects.toThrow("need Developer Mode");
+});
+
+it("keeps links made before Windows stopped allowing new ones", async () => {
+  const f = await windows(true);
+  await f.step("run");
+  await f.refuseLinks();
+  const { stdout, stderr } = await f.step("run", "--version");
+  expect(stdout.trim().split("\n")[0]).toBe(f.own);
+  expect(stderr).toBe("");
+});

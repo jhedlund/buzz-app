@@ -462,3 +462,39 @@ it.skipIf(process.platform !== "darwin")(
     );
   },
 );
+
+it("runs and switches to claude.exe under Git for Windows", async () => {
+  const { home } = await disk([]);
+  // Where claude.sh keeps releases off macOS, whatever this computer is.
+  const dir = join(home, ".local/share/buzz/claude-code");
+  const bin = join(home, "bin");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "uname"),
+    '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo MINGW64_NT-10.0-26100\n',
+  );
+  await chmod(join(bin, "uname"), 0o755);
+  for (const version of ["2.1.300", "2.1.301"]) {
+    const binary = join(dir, version, "claude.exe");
+    await mkdir(dirname(binary), { recursive: true });
+    await writeFile(binary, `#!/bin/sh\necho "${version}"\n`);
+    await chmod(binary, 0o755);
+  }
+  const step = (...args: string[]) =>
+    run("bash", ["-c", script, "claude.sh", ...args], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home },
+    });
+  await expect(step("run", "--version")).rejects.toThrow(
+    "Claude is not installed",
+  );
+  await step("use", "2.1.301");
+  expect((await step("run", "--version")).stdout.trim()).toBe("2.1.301");
+  // A release without `claude.exe` was not downloaded for Windows.
+  await mkdir(join(dir, "2.1.302"));
+  await writeFile(join(dir, "2.1.302/claude"), "#!/bin/sh\n");
+  await chmod(join(dir, "2.1.302/claude"), 0o755);
+  await expect(step("use", "2.1.302")).rejects.toThrow("no longer downloaded");
+  await expect(
+    step("install", "2.1.302", "win32-arm64", "0".repeat(63)),
+  ).rejects.toThrow("Invalid checksum");
+});

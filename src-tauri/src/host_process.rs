@@ -643,9 +643,15 @@ fn process_command(
     if helper.is_some() {
         command.arg("--launch").arg(program);
     }
+    #[cfg(windows)]
+    crate::host_command::git_bash::add_args(
+        &mut command,
+        executable,
+        declared_args.iter().chain(args),
+    );
+    #[cfg(not(windows))]
+    command.args(declared_args).args(args);
     command
-        .args(declared_args)
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -904,6 +910,11 @@ fn program_path(
         return verify_artifact(artifact);
     }
     if !declared.bundled {
+        // Says Git for Windows is missing, rather than starting WSL's bash.
+        #[cfg(windows)]
+        if let Some(program) = crate::host_command::git_bash::program(&declared.program) {
+            return program;
+        }
         return Ok(resolve_program(&declared.program, path));
     }
     let resources = resources().ok_or_else(|| format!("Could not start {}", declared.program))?;

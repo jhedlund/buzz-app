@@ -9,12 +9,13 @@ import type {
   HostResponse,
 } from "../../features/host/service";
 import script from "./codex.sh?raw";
+import { scriptOptions, windowsMachine, WINDOWS_PWD } from "../git-bash";
 import { AppServer, listModels, needsSignIn, type Spawn } from "./rpc";
 
 export type CodexStatus =
   | Readonly<{ state: "missing" }>
-  | Readonly<{ state: "signed-out"; version: string }>
-  | Readonly<{ state: "ready"; version: string }>
+  | Readonly<{ state: "signed-out"; version: string; shared?: true }>
+  | Readonly<{ state: "ready"; version: string; shared?: true }>
   | Readonly<{ state: "error"; message: string }>;
 
 const CHECK_TIMEOUT_MS = 15_000;
@@ -29,6 +30,18 @@ const TARGETS: Readonly<Record<string, string>> = {
   "Linux aarch64": "aarch64-unknown-linux-musl",
   "Linux x86_64": "x86_64-unknown-linux-musl",
 };
+const WINDOWS_TARGETS: Readonly<Record<string, string>> = {
+  x86_64: "x86_64-pc-windows-msvc",
+  aarch64: "aarch64-pc-windows-msvc",
+  arm64: "aarch64-pc-windows-msvc",
+};
+export const targetOf = (uname: string) => {
+  const machine = windowsMachine(uname);
+  return machine ? WINDOWS_TARGETS[machine] : TARGETS[uname.trim()];
+};
+/** What `codex.sh` says when Codex runs in the user's own Codex home: on
+ * Windows without Developer Mode, which links need. */
+const SHARED_HOME = "Buzz's Codex shares your Codex home";
 
 /** The `codex.sh` step, and its first arguments, behind each process the
  * plugin starts by name. */
@@ -47,15 +60,24 @@ const STEPS: Readonly<Record<string, readonly string[]>> = {
  * `read-from`, `login` and `review` as steps of `codex.sh`, which the manifest grants as `bash -c`; other
  * processes start as declared. */
 export const withScript =
-  (spawn: Spawn): Spawn =>
+  (spawn: Spawn, windows = false): Spawn =>
   (id, options) => {
     const step = STEPS[id];
-    return step
-      ? spawn("codex-sh", {
-          ...options,
-          args: [script, "codex.sh", ...step, ...(options?.args ?? [])],
-        })
-      : spawn(id, options);
+    if (step)
+      return spawn(
+        "codex-sh",
+        scriptOptions(
+          script,
+          "codex.sh",
+          [...step, ...(options?.args ?? [])],
+          options,
+          windows,
+        ),
+      );
+    // Windows names the folder as Codex there reads it.
+    if (windows && id === "workspace")
+      return spawn("codex-sh", { ...options, args: [WINDOWS_PWD] });
+    return spawn(id, options);
   };
 
 /** Runs a short process and returns its exit code and output. */
@@ -113,6 +135,7 @@ export async function reviewHome(spawn: Spawn) {
 
 export async function checkCodex(spawn: Spawn): Promise<CodexStatus> {
   let version: string;
+  let shared: boolean;
   try {
     const result = await collect(spawn, "codex", ["--version"]);
     // The launcher's answer when Buzz has no copy yet.
@@ -124,12 +147,14 @@ export async function checkCodex(spawn: Spawn): Promise<CodexStatus> {
       };
     // `codex-cli 0.162.1`
     version = result.stdout.trim().split(/\s/)[1] ?? "";
+    shared = result.stderr.includes(SHARED_HOME);
   } catch (error) {
     return { state: "error", message: message(error) };
   }
+  const found = { version, ...(shared ? { shared: true as const } : {}) };
   try {
     const { code } = await collect(spawn, "codex", ["login", "status"]);
-    if (code === 0) return { state: "ready", version };
+    if (code === 0) return { state: "ready", ...found };
     // `login status` ignores the model provider, which may need no OpenAI sign-in.
     const rpc = new AppServer();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -143,13 +168,13 @@ export async function checkCodex(spawn: Spawn): Promise<CodexStatus> {
           );
         }),
       ]);
-      return { state: signedOut ? "signed-out" : "ready", version };
+      return { state: signedOut ? "signed-out" : "ready", ...found };
     } finally {
       clearTimeout(timer);
       await rpc.close();
     }
   } catch {
-    return { state: "signed-out", version };
+    return { state: "signed-out", ...found };
   }
 }
 
@@ -416,8 +441,7 @@ export class CodexSetup {
       throw new Error("releases.openai.com did not name a release");
     if (latest === current || this.refused.has(latest) || this.cancelled)
       return;
-    const target =
-      TARGETS[(await collect(spawn, "platform", [])).stdout.trim()];
+    const target = targetOf((await collect(spawn, "platform", [])).stdout);
     if (!target) throw new Error("Codex is not available for this computer");
     const asset = `codex-package-${target}.tar.gz`;
     const digest = release.assets?.find((item) => item.name === asset)?.digest;

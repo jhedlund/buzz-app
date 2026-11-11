@@ -74,10 +74,13 @@ and write instructions. Then click **Create agent**.
 
 | Harness | Platforms | What you need |
 | --- | --- | --- |
-| Claude | macOS, Linux | A Claude account. Click **Install integration** to download Buzz's own copy (about 250 MB), then **Sign in** in your browser. It shares settings with the `claude` in your terminal but doesn't change it. |
-| Codex | macOS, Linux | A ChatGPT or OpenAI account. Click **Install integration** (about 130 MB), then **Sign in** in your browser. |
+| Claude | macOS, Linux, Windows | A Claude account. Click **Install integration** to download Buzz's own copy (about 250 MB), then **Sign in** in your browser. It shares settings with the `claude` in your terminal but doesn't change it. |
+| Codex | macOS, Linux, Windows | A ChatGPT or OpenAI account. Click **Install integration** (about 130 MB), then **Sign in** in your browser. |
 | Goose | macOS, Linux, Windows | Included with Buzz. Choose a model provider and enter its key in **Settings → Agent setup → Harness defaults → Goose**. Providers that sign in through goose instead need `goose configure` from the separate goose CLI. |
 | Pi | macOS, Linux, Windows | Node.js 22.19 or later. Turn on **Pi** in **Settings → Plugins** first. Click the model, choose a provider, paste its **API key**, and click **Save to Pi**. Providers that sign in another way need `pi`, then `/login`, in your terminal. |
+
+On Windows, Claude and Codex also need [Git for Windows](https://git-scm.com/download/win).
+With Developer Mode off, Codex agents share your own Codex history.
 
 The install and sign-in buttons appear in the create dialog's **Model** row, and
 in **Settings → Agent setup → Harness defaults**. Agents run on your computer
@@ -110,7 +113,8 @@ ln -sf /Applications/Buzz.app/Contents/Resources/bin/buzz ~/.local/bin/buzz
 - Updates can break plugins (see [Plugins](#plugins)).
 - The Windows installer is unsigned, and Intel macOS, Windows and Linux get
   less testing than Apple Silicon macOS.
-- Claude and Codex agents need macOS or Linux. Goose and Pi work everywhere.
+- Claude and Codex agents need Git for Windows on Windows. Goose and Pi work
+  everywhere.
 - Buzz doesn't back up your key, so keep your own copy (see step 2).
 - Bringing your identity over from Buzz 0.X doesn't bring your communities
   (rejoin them in step 3) or your agents. On the Agents page, bring agents
