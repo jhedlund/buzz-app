@@ -72,6 +72,8 @@ mod microphone;
 mod mouse_nav;
 #[cfg(target_os = "macos")]
 mod reshow;
+#[cfg(windows)]
+mod tray;
 
 mod notifications;
 mod os_idle;
@@ -1007,6 +1009,9 @@ pub fn run() {
             mouse_nav::install(app.handle());
             #[cfg(target_os = "macos")]
             reshow::install(app.handle());
+            // Before any close hides the window: the icon is the way back.
+            #[cfg(windows)]
+            tray::install(app.handle())?;
             #[cfg(target_os = "macos")]
             if let Some(home) = dirs::home_dir() {
                 if let Err(error) = legacy_cli_shortcut::remove_stale(&home.join(".local/bin")) {
@@ -1264,6 +1269,17 @@ pub fn run() {
                         eprintln!("Could not close Buzz window: {error}");
                     } else {
                         reshow::closed();
+                    }
+                    return;
+                }
+            }
+            // As on macOS; the notification-area icon reopens and quits Buzz.
+            #[cfg(windows)]
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        eprintln!("Could not close Buzz window: {error}");
                     }
                     return;
                 }
