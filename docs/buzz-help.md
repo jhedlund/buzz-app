@@ -452,6 +452,14 @@ revokes all of them, and a pairing unused for 30 days expires.
   New reactions from updated clients appear; older unaddressed reactions are not backfilled.
   While Buzz is visible, a live reaction briefly replaces the Activity bell with its emoji for three seconds.
   Further reactions during that hold do not change the icon; history loading does not trigger it.
+- **Threads** (below Activity in the Messages sidebar, or Cmd/Ctrl+Shift+H) lists threads that have a
+  title in channels you have joined, most recent reply or title change first. Choose one to open the thread,
+  or narrow the list with the channel menu. **Rename** edits a title in place (Enter saves, Escape cancels,
+  an empty title clears it); **Clear title** removes it for everyone. If someone else changed the title
+  first, nothing is overwritten: refresh and try again. Titles are shared, channel-visible data that
+  agents and the `buzz threads title` CLI also set, and Buzz 0.x shows the same titles; they are not
+  searchable and do not appear in the thread itself yet. Title changes and new replies update the open
+  list; **Refresh** reads it again. Provided by the optional Named threads plugin, on by default.
 - **New messages** marks the first known unread incoming channel message when
   you enter. Once established, the divider stays in place for that visit as you
   read, reveal another message, or receive new messages. In a channel with more
