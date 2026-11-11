@@ -542,6 +542,8 @@ pub fn bundled_manifests() -> Vec<Manifest> {
             "../../../src/bundled/changesets/manifest.json"
         ))
         .expect("changesets manifest"),
+        serde_json::from_str(include_str!("../../../src/bundled/threads/manifest.json"))
+            .expect("threads manifest"),
     ]
 }
 /// New bundles must opt in to the default-on policy.
@@ -565,6 +567,7 @@ fn enabled_by_default(id: &str) -> bool {
             | "buzz.watching"
             | "buzz.pairing"
             | "buzz.inbox"
+            | "buzz.threads"
             | "buzz.repos"
             | "buzz.agents"
             | "buzz.claude-code"
