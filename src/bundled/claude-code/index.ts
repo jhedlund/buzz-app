@@ -10,6 +10,7 @@ import { ownerReads } from "../../features/agents/reads";
 import { withProviderWords } from "../../features/agents/failure-words";
 import { refusedByBuzz } from "./auth";
 import type { PluginModule } from "../../plugins/api";
+import { onWindows } from "../git-bash";
 import { ClaudeLogoIcon } from "../../shared/design-system/icons";
 import { claudeRun, TYPE_ID } from "./run";
 import { ClaudeDefaults } from "./defaults";
@@ -24,12 +25,13 @@ const UPDATE_MS = 6 * 60 * 60_000;
 
 export const inject = ["agents", "host", "agentProtection", "navigation"];
 export const apply: PluginModule["apply"] = (ctx) => {
-  // Only the desktop app can start `claude`, and setup and file uploads run
-  // `bash` and `base64`, which stock Windows lacks; no unusable type elsewhere.
-  if (!isTauri() || !/Mac|Linux/i.test(navigator.platform)) return;
+  // Only the desktop app can start `claude`. Setup and file uploads run `bash`
+  // and `base64`, which on Windows come from Git for Windows: without it,
+  // Settings says so.
+  if (!isTauri() || !/Mac|Linux|Win/i.test(navigator.platform)) return;
   const { agents, host } = ctx;
   const typeKey = `${ctx.pluginOwner?.id ?? "buzz.claude-code"}/${TYPE_ID}`;
-  const spawn = host.spawn && withScript(host.spawn.bind(host));
+  const spawn = host.spawn && withScript(host.spawn.bind(host), onWindows());
   const readFile = host.readFile?.bind(host);
   const setup = new ClaudeSetup(spawn, (input) => host.request(input));
   ctx.agentProtection.registerModels({

@@ -891,10 +891,12 @@ it("is an agent type on the desktop app", () => {
   ]);
 });
 
-it("registers only where setup's bash and base64 exist", () => {
+it("registers only in the desktop app, Windows included", () => {
   vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
   expect(applied().type).toBeDefined();
   vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+  expect(applied().type).toBeDefined();
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("iPhone");
   expect(applied().type).toBeUndefined();
   vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   desktop.tauri = false;

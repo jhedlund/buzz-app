@@ -45,7 +45,7 @@ function applied(binding?: AgentExecutionBinding) {
   return type;
 }
 
-it("registers only where the desktop app can run codex and base64", () => {
+it("registers only in the desktop app, Windows included", () => {
   const check = vi.spyOn(CodexProvider.prototype, "check").mockResolvedValue();
   const type = applied();
   expect(check).not.toHaveBeenCalled();
@@ -63,6 +63,8 @@ it("registers only where the desktop app can run codex and base64", () => {
   vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
   expect(applied()).toBeDefined();
   vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+  expect(applied()).toBeDefined();
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("iPhone");
   expect(applied()).toBeUndefined();
   vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   desktop.tauri = false;

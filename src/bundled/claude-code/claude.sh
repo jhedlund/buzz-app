@@ -21,6 +21,8 @@ if [ "$(uname)" = Darwin ]; then
 else
   dir="${XDG_DATA_HOME:-$HOME/.local/share}/buzz/claude-code"
 fi
+# Windows releases are `claude.exe`, under Git for Windows' bash.
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) exe=.exe ;; *) exe="" ;; esac
 
 # Refuses a review folder that is a link or not a folder.
 review_folder() {
@@ -66,7 +68,7 @@ run)
     version="${BUZZ_CLAUDE_VERSION:-$(cat "$dir/current" 2>/dev/null)}"
     # 127, as for a missing program: the plugin reads it as "not installed".
     valid "$version" || { echo "Claude is not installed" >&2; exit 127; }
-    exec "$dir/$version/claude" "$@"
+    exec "$dir/$version/claude$exe" "$@"
     # Builds that switched after the read above may have pruned its release;
     # then start the one `current` names now.
     [ -z "${BUZZ_CLAUDE_VERSION:-}" ] &&
@@ -77,7 +79,7 @@ install)
   version="$1" platform="$2" checksum="$3"
   valid "$version" || { echo "Invalid version" >&2; exit 2; }
   case "$platform" in
-  darwin-arm64 | darwin-x64 | linux-arm64 | linux-x64) ;;
+  darwin-arm64 | darwin-x64 | linux-arm64 | linux-x64 | win32-arm64 | win32-x64) ;;
   *) echo "Unsupported platform" >&2; exit 2 ;;
   esac
   # 64 hex digits, so a hash that failed and printed nothing can never match it.
@@ -86,7 +88,7 @@ install)
   sha256() { (shasum -a 256 "$1" 2>/dev/null || sha256sum "$1") | cut -d" " -f1; }
   # A download whose switch never ran, such as one stopped before `use`, is
   # used again once its bytes match the checksum; anything else is replaced.
-  binary="$dir/$version/claude"
+  binary="$dir/$version/claude$exe"
   if [ -f "$binary" ] && [ ! -h "$binary" ] && [ "$(sha256 "$binary")" = "$checksum" ] &&
     { [ -x "$binary" ] || chmod +x "$binary" 2>/dev/null; }; then
     echo "Claude $version is already downloaded."
@@ -100,7 +102,7 @@ install)
   trap 'exit 143' INT TERM
   # Give up on a stalled download rather than holding the update forever.
   curl -fsSL --speed-limit 1024 --speed-time 60 -o "$part" \
-    "https://downloads.claude.ai/claude-code-releases/$version/$platform/claude"
+    "https://downloads.claude.ai/claude-code-releases/$version/$platform/claude$exe"
   # The release manifest's checksum, which the plugin passes in.
   [ "$(sha256 "$part")" = "$checksum" ] || { echo "The download did not match its checksum" >&2; exit 1; }
   chmod +x "$part"
@@ -121,7 +123,7 @@ use)
       flock($lock, LOCK_EX) or die "$!\n"'
   fi
   # Checked under the lock: another build may have pruned it meanwhile.
-  test -x "$dir/$version/claude" ||
+  test -x "$dir/$version/claude$exe" ||
     { echo "Claude Code $version is no longer downloaded" >&2; exit 1; }
   previous=$(cat "$dir/current" 2>/dev/null || true)
   printf %s "$version" >"$dir/current.$$"

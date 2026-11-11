@@ -817,6 +817,14 @@ export function createTabs(
             {installing.notice}
           </p>
         )}
+        {installing.status &&
+          "shared" in installing.status &&
+          installing.status.shared && (
+            <p role="status" className="m-0 text-body-sm">
+              Codex agents use your own Codex history on this computer. Turn on
+              Developer Mode in Windows Settings to keep them separate.
+            </p>
+          )}
         <form
           id={defaultsForm}
           className="grid gap-3"
