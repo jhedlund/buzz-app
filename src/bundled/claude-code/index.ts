@@ -223,10 +223,11 @@ export const apply: PluginModule["apply"] = (ctx) => {
       get attentionAction() {
         const state = setup.snapshot();
         if (state.running) return undefined;
-        // Signed out, configuration opens: it offers each way to sign in.
         return state.status?.state === "outdated"
           ? () => void setup.run("install")
-          : undefined;
+          : state.status?.state === "signed-out" && setup.auth.signIn
+            ? () => void setup.run("sign-in")
+            : undefined;
       },
       DialogBody: ProviderDialogBody,
       DefaultControl,

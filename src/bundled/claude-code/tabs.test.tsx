@@ -1080,8 +1080,11 @@ it("replaces generic installation copy with the latest installer state", async (
   const installedType = installed({ available: false }).type;
   const Setup = providerSetup(installedType);
   render(<Setup onClose={vi.fn()} />);
-  expect(await screen.findByRole("status")).toHaveTextContent(
-    "The Claude integration isn't installed yet.",
+  // After the first check, which also looks for an account.
+  await waitFor(() =>
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The Claude integration isn't installed yet.",
+    ),
   );
   await userEvent
     .setup()
@@ -1095,25 +1098,16 @@ it("replaces generic installation copy with the latest installer state", async (
   expect(screen.queryByLabelText("Setup output")).toBeNull();
 });
 
-it.each([false, true])(
-  "opens its dialog for a missing key rather than running a step, with a sign-in step: %s",
-  async (signIn) => {
-    interactive.signIn = signIn;
-    try {
-      const { type } = installed({ keySaved: false });
-      await waitFor(() =>
-        expect(type.provider?.snapshot()).toMatchObject({
-          readiness: "attention",
-          attentionLabel: signIn ? "Sign in to Claude" : "Add Claude API key",
-        }),
-      );
-      // The dialog offers the key as well as the sign-in.
-      expect(type.provider?.attentionAction).toBeUndefined();
-    } finally {
-      interactive.signIn = false;
-    }
-  },
-);
+it("opens its dialog for a missing key rather than running a step", async () => {
+  const { type } = installed({ keySaved: false });
+  await waitFor(() =>
+    expect(type.provider?.snapshot()).toMatchObject({
+      readiness: "attention",
+      attentionLabel: "Add Claude API key",
+    }),
+  );
+  expect(type.provider?.attentionAction).toBeUndefined();
+});
 
 it("leaves a missing copy to the provider dialog", async () => {
   // Without an attention action, Settings' Harness defaults row opens
@@ -1156,7 +1150,7 @@ it("signs in from the Settings row directly when the build has a sign-in", async
     await waitFor(() =>
       expect(type.provider?.snapshot()).toMatchObject({
         readiness: "attention",
-        attentionLabel: "Add Claude API key",
+        attentionLabel: "Sign in to Claude",
       }),
     );
     const action = type.provider?.attentionAction;
