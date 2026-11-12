@@ -10,6 +10,7 @@ import {
   CaretRightIcon,
   CheckCircleFilledIcon,
   CheckCircleIcon,
+  ChecksIcon,
   MessageReplyIcon,
   PencilSimpleIcon,
   PinFilledIcon,
@@ -17,6 +18,8 @@ import {
   XIcon,
 } from "../../shared/design-system/icons";
 import { Button } from "../../shared/design-system/ui/Button";
+import { CountBadge } from "../../shared/design-system/ui/CountBadge";
+import { TypingDots } from "../../shared/design-system/ui/TypingDots";
 import { EmptyState } from "../../shared/design-system/ui/EmptyState";
 import { FullPageSurface } from "../../shared/design-system/ui/FullPageSurface";
 import { IconButton } from "../../shared/design-system/ui/IconButton";
@@ -56,6 +59,7 @@ import {
   parseMarks,
   setMark,
 } from "./thread-marks";
+import { useThreadSignals, workingDuration } from "./thread-signals";
 
 const ALL = "";
 
@@ -316,17 +320,49 @@ export function ThreadsView({
 
   // The replies in a row's newest second count only when that second is a
   // reply's, not its title's.
+  const signals = useThreadSignals(
+    session,
+    useMemo(() => [...new Set(titles?.map((t) => t.channel))], [titles]),
+  );
+  const unreadOf = (row: Row) =>
+    signals.unread.get(activityKey(row.channel, row.root)) ?? 0;
+  // One tick for the page, only while a working row shows a time.
+  const timed = [...signals.working.values()].some(
+    (work) => work.startedAt !== undefined,
+  );
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!timed) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [timed]);
+  const markRead = async (row: Row) => {
+    setSaveError(undefined);
+    try {
+      await session.unread.prepareThreadRead(row.channel, row.root)();
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  // Unread replies also reopen a done thread, as in Buzz 0.x: a view rule
+  // only, the saved mark is untouched.
   const done = (row: Row) => {
     const frontier = activity.get(activityKey(row.channel, row.root));
-    return isDone(
-      marks?.done.get(row.root),
-      row.activeAt,
-      frontier?.at === row.activeAt ? frontier.ids : [],
+    return (
+      !unreadOf(row) &&
+      isDone(
+        marks?.done.get(row.root),
+        row.activeAt,
+        frontier?.at === row.activeAt ? frontier.ids : [],
+      )
     );
   };
   const renderRow = (row: Row) => {
     const isPinned = !!marks?.pins.get(row.root)?.on;
     const isDoneRow = done(row);
+    const unread = unreadOf(row);
+    const work = signals.working.get(activityKey(row.channel, row.root));
     return (
       <li key={row.root} className={styles.row}>
         {editing === row.root ? (
@@ -345,12 +381,35 @@ export function ThreadsView({
               aria-busy={saving === row.root || undefined}
               label={
                 <span className={styles.label}>
-                  <span className="text-body">{row.title}</span>
+                  <span className={`text-body ${unread ? styles.unread : ""}`}>
+                    {row.title}
+                  </span>
                   <span className="text-caption text-subtle">
                     {names.get(row.channel) ?? "Conversation"} ·{" "}
                     {relativeTimestamp(row.activeAt)}
                   </span>
                 </span>
+              }
+              trailing={
+                (unread > 0 || work) && (
+                  <span className={styles.signals}>
+                    {work && (
+                      <span
+                        className={`text-caption ${styles.working}`}
+                        role="img"
+                        aria-label={`${work.agents.length === 1 ? "An agent is" : `${work.agents.length} agents are`} working${work.startedAt === undefined ? "" : ` for ${workingDuration(work.startedAt, now)}`}`}
+                      >
+                        <TypingDots size="small" />
+                        {work.startedAt !== undefined &&
+                          workingDuration(work.startedAt, now)}
+                      </span>
+                    )}
+                    <CountBadge
+                      count={unread}
+                      label={`${unread} unread ${unread === 1 ? "reply" : "replies"}`}
+                    />
+                  </span>
+                )
               }
               onClick={() =>
                 void navigator.open({
@@ -363,7 +422,7 @@ export function ThreadsView({
                 })
               }
             />
-            {(writer || marks) && (
+            {(writer || marks || unread > 0) && (
               <span className={styles.actions}>
                 {marks && (
                   <>
@@ -396,6 +455,15 @@ export function ThreadsView({
                       onClick={() => void mark("done", row.root, !isDoneRow)}
                     />
                   </>
+                )}
+                {unread > 0 && (
+                  <IconButton
+                    variant="bare"
+                    icon={<ChecksIcon size={16} />}
+                    aria-label={`Mark ${row.title} read`}
+                    title="Mark read"
+                    onClick={() => void markRead(row)}
+                  />
                 )}
                 {writer && (
                   <IconButton
