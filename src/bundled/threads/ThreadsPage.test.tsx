@@ -865,3 +865,30 @@ it("shows how long agents have been working in a thread, then clears it", async 
     ).not.toBeInTheDocument(),
   );
 });
+
+it("loads a thread root unread state hasn't seen before marking the thread read", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 2 }]);
+    f.signals.emit();
+  });
+  // As the session's unread state does for a root it holds no evidence of.
+  f.prepareThreadRead.mockImplementationOnce(() => {
+    throw new Error("Verified readable message evidence unavailable");
+  });
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Mark Bug triage read" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /unread repl/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(f.read).toHaveBeenCalledWith(
+    [{ ids: [B], "#h": [BETA], limit: 1 }],
+    expect.anything(),
+  );
+  expect(f.prepareThreadRead).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});

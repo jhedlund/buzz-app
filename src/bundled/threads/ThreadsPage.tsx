@@ -340,7 +340,21 @@ export function ThreadsView({
   const markRead = async (row: Row) => {
     setSaveError(undefined);
     try {
-      await session.unread.prepareThreadRead(row.channel, row.root)();
+      let prepared: () => Promise<unknown>;
+      try {
+        prepared = session.unread.prepareThreadRead(row.channel, row.root);
+      } catch {
+        // Unread state has only the roots this session has seen. A verified
+        // read of the root lets it prepare the read; a second failure is real.
+        await session.read(
+          [{ ids: [row.root], "#h": [row.channel], limit: 1 }],
+          {
+            signal: AbortSignal.timeout(20_000),
+          },
+        );
+        prepared = session.unread.prepareThreadRead(row.channel, row.root);
+      }
+      await prepared();
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : String(cause));
     }
