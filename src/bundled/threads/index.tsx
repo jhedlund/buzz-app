@@ -1,7 +1,14 @@
 import type { PluginModule } from "../../plugins/api";
 import { ThreadsPage } from "./ThreadsPage";
+import { TitleAccessory } from "./TitleAccessory";
 
-export const inject = ["pages", "relay", "navigation", "shortcuts"];
+export const inject = [
+  "pages",
+  "relay",
+  "navigation",
+  "shortcuts",
+  "conversation",
+];
 export const apply: PluginModule["apply"] = (ctx) => {
   const relay = ctx.relay;
   const navigator = ctx.navigation;
@@ -27,5 +34,11 @@ export const apply: PluginModule["apply"] = (ctx) => {
     layout: "workspace",
     primary: true,
     component: () => <ThreadsPage relay={relay} navigator={navigator} />,
+  });
+  ctx.conversation.registerAccessory({
+    id: "thread-title",
+    title: "Thread title",
+    placement: "message",
+    component: TitleAccessory,
   });
 };
