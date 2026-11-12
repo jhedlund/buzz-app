@@ -71,7 +71,7 @@ it("names the agent's workspace for a thread in a conversation folder", () => {
   );
 });
 
-it("asks the first agent a person names in a new top-level message to title it", () => {
+it("asks the agents a person names in a new top-level message to title it", () => {
   const ask = "call `thread_title` with `if_unset: true`";
   const agent = "c".repeat(64);
   const mention = (tags: string[][]) =>
@@ -88,6 +88,9 @@ it("asks the first agent a person names in a new top-level message to title it",
       root,
       "hi",
     ),
+  ).toContain(ask);
+  expect(
+    turnInput(agent, mention([["p", "b".repeat(64)]]), root, "hi"),
   ).not.toContain(ask);
   expect(
     turnInput(
