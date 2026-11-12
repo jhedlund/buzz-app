@@ -62,6 +62,12 @@ import {
 import { useThreadSignals, workingDuration } from "./thread-signals";
 
 const ALL = "";
+type MarkChange = Readonly<{
+  kind: MarkKind;
+  root: string;
+  on: boolean;
+  at: number;
+}>;
 
 export function ThreadsPage({
   relay,
@@ -192,64 +198,104 @@ export function ThreadsView({
   // and write; without it the page shows neither. Read on open and Refresh.
   const readMarks = session.readThreadMarks;
   const writeMarks = session.writeThreadMarks;
-  const [marks, setMarks] = useState<
+  // What the relay last said, and the changes not yet saved: the page shows
+  // the saved marks with every pending change applied, so a read or a
+  // write's result never hides a change still in the queue.
+  const [saved, setSaved] = useState<
     Readonly<{ pins: Marks; done: Marks }> | undefined
   >();
-  const [marking, setMarking] = useState<string>();
+  const [pending, setPending] = useState<readonly MarkChange[]>([]);
+  const marks = useMemo(
+    () =>
+      saved &&
+      pending.reduce(
+        (shown, change) => ({
+          ...shown,
+          [change.kind]: setMark(
+            shown[change.kind],
+            change.root,
+            change.on,
+            change.at,
+          ),
+        }),
+        saved,
+      ),
+    [saved, pending],
+  );
   const [showDone, setShowDone] = useState(false);
   const [marksGeneration, setMarksGeneration] = useState(0);
+  // Reads and writes of the marks run one at a time, so a read never lands
+  // after a later write it doesn't include.
+  const marksQueue = useRef(Promise.resolve());
+  const readSaved = useCallback(
+    async (signal: AbortSignal) => {
+      if (!readMarks) return;
+      const [pins, done] = await Promise.all(
+        (["pins", "done"] as const).map(async (kind) =>
+          parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+        ),
+      );
+      if (pins && done && !signal.aborted) setSaved({ pins, done });
+    },
+    [readMarks],
+  );
   useEffect(() => {
     void marksGeneration;
     if (!readMarks) return;
     const controller = new AbortController();
     const { signal } = controller;
-    Promise.all(
-      (["pins", "done"] as const).map(async (kind) =>
-        parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+    marksQueue.current = marksQueue.current.then(() =>
+      readSaved(AbortSignal.any([signal, AbortSignal.timeout(20_000)])).catch(
+        (cause) => {
+          if (!signal.aborted)
+            setSaveError(
+              cause instanceof Error ? cause.message : String(cause),
+            );
+        },
       ),
-    ).then(
-      ([pins, done]) => {
-        if (pins && done) setMarks({ pins, done });
-      },
-      (cause) => {
-        if (!signal.aborted)
-          setSaveError(cause instanceof Error ? cause.message : String(cause));
-      },
     );
     return () => controller.abort();
-  }, [readMarks, marksGeneration]);
-  // Each change reads the latest record, sets one root and writes it back;
-  // an unreadable record aborts before anything is written.
+  }, [readMarks, readSaved, marksGeneration]);
+  // A mark shows at once. Each write reads the latest record and changes one
+  // root (an unreadable record aborts before anything is written); its
+  // result becomes the saved marks. A failed write drops its own change and
+  // reads the saved marks again, still in turn.
   const mark = useCallback(
-    async (kind: MarkKind, root: string, on: boolean) => {
+    (kind: MarkKind, root: string, on: boolean) => {
       if (!writeMarks) return;
-      setMarking(root);
       setSaveError(undefined);
-      try {
-        const saved = parseMarks(
-          kind,
-          await writeMarks(
-            MARK_COORDINATE[kind],
-            (current) =>
-              encodeMarks(
-                kind,
-                setMark(parseMarks(kind, current), root, on, Date.now()),
-              ),
-            AbortSignal.timeout(20_000),
-          ),
-        );
-        setMarks((current) => current && { ...current, [kind]: saved });
-        if (!!saved.get(root)?.on !== on)
-          throw new Error(
-            "That changed on another device. Refresh and try again.",
+      const change: MarkChange = { kind, root, on, at: Date.now() };
+      setPending((current) => [...current, change]);
+      const settle = () =>
+        setPending((current) => current.filter((c) => c !== change));
+      marksQueue.current = marksQueue.current.then(async () => {
+        try {
+          const result = parseMarks(
+            kind,
+            await writeMarks(
+              MARK_COORDINATE[kind],
+              (current) =>
+                encodeMarks(
+                  kind,
+                  setMark(parseMarks(kind, current), root, on, Date.now()),
+                ),
+              AbortSignal.timeout(20_000),
+            ),
           );
-      } catch (cause) {
-        setSaveError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setMarking(undefined);
-      }
+          setSaved((current) => current && { ...current, [kind]: result });
+          settle();
+          if (!!result.get(root)?.on !== on)
+            throw new Error(
+              "That changed on another device. Refresh and try again.",
+            );
+        } catch (cause) {
+          settle();
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+          await readSaved(AbortSignal.timeout(20_000)).catch(() => {});
+        }
+      });
     },
-    [writeMarks],
+    [writeMarks, readSaved],
   );
 
   const refresh = () => {
@@ -437,57 +483,67 @@ export function ThreadsView({
               }
             />
             {(writer || marks || unread > 0) && (
+              // Pin is last, Done before it, as in Buzz 0.x. Actions show on
+              // hover or keyboard focus; a set pin or done mark stays shown.
               <span className={styles.actions}>
-                {marks && (
-                  <>
+                {writer && (
+                  <span data-reveal="">
                     <IconButton
                       variant="bare"
-                      icon={
-                        isPinned ? (
-                          <PinFilledIcon size={16} />
-                        ) : (
-                          <PinIcon size={16} />
-                        )
-                      }
-                      aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
-                      title={isPinned ? "Unpin" : "Pin"}
-                      disabled={!!marking}
-                      onClick={() => void mark("pins", row.root, !isPinned)}
+                      icon={<PencilSimpleIcon size={16} />}
+                      aria-label={`Rename ${row.title}`}
+                      title="Rename"
+                      disabled={!!saving}
+                      onClick={() => setEditing(row.root)}
                     />
-                    <IconButton
-                      variant="bare"
-                      icon={
-                        isDoneRow ? (
-                          <CheckCircleFilledIcon size={16} />
-                        ) : (
-                          <CheckCircleIcon size={16} />
-                        )
-                      }
-                      aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
-                      title={isDoneRow ? "Reopen" : "Mark done"}
-                      disabled={!!marking}
-                      onClick={() => void mark("done", row.root, !isDoneRow)}
-                    />
-                  </>
+                  </span>
                 )}
                 {unread > 0 && (
-                  <IconButton
-                    variant="bare"
-                    icon={<ChecksIcon size={16} />}
-                    aria-label={`Mark ${row.title} read`}
-                    title="Mark read"
-                    onClick={() => void markRead(row)}
-                  />
+                  <span data-reveal="">
+                    <IconButton
+                      variant="bare"
+                      icon={<ChecksIcon size={16} />}
+                      aria-label={`Mark ${row.title} read`}
+                      title="Mark read"
+                      onClick={() => void markRead(row)}
+                    />
+                  </span>
                 )}
-                {writer && (
-                  <IconButton
-                    variant="bare"
-                    icon={<PencilSimpleIcon size={16} />}
-                    aria-label={`Rename ${row.title}`}
-                    title="Rename"
-                    disabled={!!saving}
-                    onClick={() => setEditing(row.root)}
-                  />
+                {marks && (
+                  <>
+                    <span data-reveal={isDoneRow ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isDoneRow ? (
+                            <CheckCircleFilledIcon size={16} />
+                          ) : (
+                            <CheckCircleIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
+                        aria-pressed={isDoneRow}
+                        title={isDoneRow ? "Reopen" : "Mark done"}
+                        onClick={() => mark("done", row.root, !isDoneRow)}
+                      />
+                    </span>
+                    <span data-reveal={isPinned ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isPinned ? (
+                            <PinFilledIcon size={16} />
+                          ) : (
+                            <PinIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
+                        aria-pressed={isPinned}
+                        title={isPinned ? "Unpin" : "Pin"}
+                        onClick={() => mark("pins", row.root, !isPinned)}
+                      />
+                    </span>
+                  </>
                 )}
               </span>
             )}

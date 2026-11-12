@@ -80,3 +80,19 @@
   border-radius: 50%;
   background: var(--affordance-prominent-mark);
 }
+
+/* Row actions show on row hover or keyboard focus (not any focus: a clicked
+   button keeps focus, which would leave them shown), always without hover. */
+.row [data-reveal] {
+  opacity: 0;
+}
+
+:is(.row:hover, .row:has(:focus-visible)) [data-reveal] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .row [data-reveal] {
+    opacity: 1;
+  }
+}
