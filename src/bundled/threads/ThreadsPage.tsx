@@ -441,7 +441,10 @@ export function ThreadsView({
               aria-busy={saving === row.root || undefined}
               label={
                 <span className={styles.label}>
-                  <span className={`text-body ${unread ? styles.unread : ""}`}>
+                  <span
+                    className={`text-body ${styles.title}`}
+                    data-unread={unread > 0 || undefined}
+                  >
                     {row.title}
                   </span>
                   <span className="text-caption text-subtle">
@@ -463,6 +466,9 @@ export function ThreadsView({
                         {work.startedAt !== undefined &&
                           workingDuration(work.startedAt, now)}
                       </span>
+                    )}
+                    {unread > 0 && (
+                      <span className={styles.unreadDot} aria-hidden="true" />
                     )}
                     <CountBadge
                       count={unread}

@@ -48,8 +48,24 @@
   margin-inline-end: var(--space-control-inset);
 }
 
-.unread {
+/* As the channel list marks unread: read titles in the quieter navigation
+   ink, unread ones in the unread ink at the heavier weight. */
+.title {
+  color: var(--text-navigation);
+}
+
+.title[data-unread] {
+  color: var(--text-navigation-unread);
   font-weight: var(--type-weight-semibold);
+}
+
+.unreadDot {
+  display: block;
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--affordance-prominent-mark);
 }
 
 .signals {
