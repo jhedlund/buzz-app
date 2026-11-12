@@ -497,7 +497,10 @@ and are asked to sign in again in Buzz.
   title in channels you have joined, most recent reply or title change first. Choose one to open the thread,
   or narrow the list with the channel menu; the **×** beside it shows all channels again. **Rename** edits a
   title in place (Enter saves, Escape cancels); saving it empty removes the title for everyone. If someone
-  else changed the title first, nothing is overwritten: refresh and try again. Titles are shared,
+  else changed the title first, nothing is overwritten: refresh and try again.
+  On the desktop app, **Pin** keeps a thread in a Pinned section at the top, and **Mark done** moves it into
+  a collapsed Done section until it has new activity; a pinned thread stays pinned even when done. Pins and
+  done marks are private to you, follow you across your desktops, and are the ones Buzz 0.x shows. Titles are shared,
   channel-visible data that agents and the `buzz threads title` CLI also set, and Buzz 0.x shows the same
   titles; they are not searchable. A titled thread shows its title under its first message in the channel
   (choose it to open the thread) and on its thread tab. Renaming a thread tab sets the shared title; if that

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Navigation } from "../../features/navigation/controller";
 import type { NavigationScope } from "../../features/navigation/targets";
 import { useChannelList, useRelayConnection } from "../../features/relay/react";
@@ -6,10 +6,17 @@ import type { RelayData } from "../../features/relay/service";
 import type { RelaySession } from "../../features/relay/session";
 import {
   ArrowsClockwiseIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  CheckCircleFilledIcon,
+  CheckCircleIcon,
   MessageReplyIcon,
   PencilSimpleIcon,
+  PinFilledIcon,
+  PinIcon,
   XIcon,
 } from "../../shared/design-system/icons";
+import { Button } from "../../shared/design-system/ui/Button";
 import { EmptyState } from "../../shared/design-system/ui/EmptyState";
 import { FullPageSurface } from "../../shared/design-system/ui/FullPageSurface";
 import { IconButton } from "../../shared/design-system/ui/IconButton";
@@ -40,6 +47,15 @@ import {
   writeTitle,
 } from "../../features/messages/thread-titles";
 import styles from "./Threads.module.css";
+import {
+  encodeMarks,
+  isDone,
+  MARK_COORDINATE,
+  type MarkKind,
+  type Marks,
+  parseMarks,
+  setMark,
+} from "./thread-marks";
 
 const ALL = "";
 
@@ -168,9 +184,74 @@ export function ThreadsView({
   const error = saveError ?? shared.error;
   const toolbar = useRef<HTMLDivElement>(null);
 
+  // Pins and done marks are private records only the desktop host can read
+  // and write; without it the page shows neither. Read on open and Refresh.
+  const readMarks = session.readThreadMarks;
+  const writeMarks = session.writeThreadMarks;
+  const [marks, setMarks] = useState<
+    Readonly<{ pins: Marks; done: Marks }> | undefined
+  >();
+  const [marking, setMarking] = useState<string>();
+  const [showDone, setShowDone] = useState(false);
+  const [marksGeneration, setMarksGeneration] = useState(0);
+  useEffect(() => {
+    void marksGeneration;
+    if (!readMarks) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    Promise.all(
+      (["pins", "done"] as const).map(async (kind) =>
+        parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+      ),
+    ).then(
+      ([pins, done]) => {
+        if (pins && done) setMarks({ pins, done });
+      },
+      (cause) => {
+        if (!signal.aborted)
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+    return () => controller.abort();
+  }, [readMarks, marksGeneration]);
+  // Each change reads the latest record, sets one root and writes it back;
+  // an unreadable record aborts before anything is written.
+  const mark = useCallback(
+    async (kind: MarkKind, root: string, on: boolean) => {
+      if (!writeMarks) return;
+      setMarking(root);
+      setSaveError(undefined);
+      try {
+        const saved = parseMarks(
+          kind,
+          await writeMarks(
+            MARK_COORDINATE[kind],
+            (current) =>
+              encodeMarks(
+                kind,
+                setMark(parseMarks(kind, current), root, on, Date.now()),
+              ),
+            AbortSignal.timeout(20_000),
+          ),
+        );
+        setMarks((current) => current && { ...current, [kind]: saved });
+        if (!!saved.get(root)?.on !== on)
+          throw new Error(
+            "That changed on another device. Refresh and try again.",
+          );
+      } catch (cause) {
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setMarking(undefined);
+      }
+    },
+    [writeMarks],
+  );
+
   const refresh = () => {
     setSaveError(undefined);
     threadActivityStore(session).refresh();
+    setMarksGeneration((g) => g + 1);
   };
 
   const rows = useMemo(
@@ -232,6 +313,104 @@ export function ThreadsView({
   const filterChannels = [...new Set((rows ?? []).map((r) => r.channel))]
     .map((id) => ({ value: id, label: names.get(id) ?? "Conversation" }))
     .sort((a, b) => a.label.localeCompare(b.label));
+
+  const renderRow = (row: Row) => {
+    const isPinned = !!marks?.pins.get(row.root)?.on;
+    const isDoneRow = isDone(marks?.done.get(row.root), row.activeAt);
+    return (
+      <li key={row.root} className={styles.row}>
+        {editing === row.root ? (
+          <TitleField
+            title={row.title}
+            onDone={(draft) =>
+              draft === undefined
+                ? setEditing(undefined)
+                : void save(row, draft)
+            }
+          />
+        ) : (
+          <NavigationCard>
+            <NavigationItem
+              multiline
+              aria-busy={saving === row.root || undefined}
+              label={
+                <span className={styles.label}>
+                  <span className="text-body">{row.title}</span>
+                  <span className="text-caption text-subtle">
+                    {names.get(row.channel) ?? "Conversation"} ·{" "}
+                    {relativeTimestamp(row.activeAt)}
+                  </span>
+                </span>
+              }
+              onClick={() =>
+                void navigator.open({
+                  version: 1,
+                  kind: "conversation",
+                  scope,
+                  channelId: row.channel,
+                  messageId: row.root,
+                  threadRootId: row.root,
+                })
+              }
+            />
+            {(writer || marks) && (
+              <span className={styles.actions}>
+                {marks && (
+                  <>
+                    <IconButton
+                      variant="bare"
+                      icon={
+                        isPinned ? (
+                          <PinFilledIcon size={16} />
+                        ) : (
+                          <PinIcon size={16} />
+                        )
+                      }
+                      aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
+                      title={isPinned ? "Unpin" : "Pin"}
+                      disabled={!!marking}
+                      onClick={() => void mark("pins", row.root, !isPinned)}
+                    />
+                    <IconButton
+                      variant="bare"
+                      icon={
+                        isDoneRow ? (
+                          <CheckCircleFilledIcon size={16} />
+                        ) : (
+                          <CheckCircleIcon size={16} />
+                        )
+                      }
+                      aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
+                      title={isDoneRow ? "Reopen" : "Mark done"}
+                      disabled={!!marking}
+                      onClick={() => void mark("done", row.root, !isDoneRow)}
+                    />
+                  </>
+                )}
+                {writer && (
+                  <IconButton
+                    variant="bare"
+                    icon={<PencilSimpleIcon size={16} />}
+                    aria-label={`Rename ${row.title}`}
+                    title="Rename"
+                    disabled={!!saving}
+                    onClick={() => setEditing(row.root)}
+                  />
+                )}
+              </span>
+            )}
+          </NavigationCard>
+        )}
+      </li>
+    );
+  };
+  const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
+  const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
+  // Pinned wins over done for placement: a pinned done thread stays pinned.
+  const finished = unpinned.filter((r) =>
+    isDone(marks?.done.get(r.root), r.activeAt),
+  );
+  const active = unpinned.filter((r) => !finished.includes(r));
 
   return (
     <div data-buzz-ui="" className={styles.page}>
@@ -296,60 +475,38 @@ export function ThreadsView({
                   }
                 />
               ) : (
-                <ul className={styles.list} aria-label="Named threads">
-                  {sorted.map((row) => (
-                    <li key={row.root} className={styles.row}>
-                      {editing === row.root ? (
-                        <TitleField
-                          title={row.title}
-                          onDone={(draft) =>
-                            draft === undefined
-                              ? setEditing(undefined)
-                              : void save(row, draft)
-                          }
-                        />
-                      ) : (
-                        <NavigationCard>
-                          <NavigationItem
-                            multiline
-                            aria-busy={saving === row.root || undefined}
-                            label={
-                              <span className={styles.label}>
-                                <span className="text-body">{row.title}</span>
-                                <span className="text-caption text-subtle">
-                                  {names.get(row.channel) ?? "Conversation"} ·{" "}
-                                  {relativeTimestamp(row.activeAt)}
-                                </span>
-                              </span>
-                            }
-                            onClick={() =>
-                              void navigator.open({
-                                version: 1,
-                                kind: "conversation",
-                                scope,
-                                channelId: row.channel,
-                                messageId: row.root,
-                                threadRootId: row.root,
-                              })
-                            }
-                          />
-                          {writer && (
-                            <span className={styles.actions}>
-                              <IconButton
-                                variant="bare"
-                                icon={<PencilSimpleIcon size={16} />}
-                                aria-label={`Rename ${row.title}`}
-                                title="Rename"
-                                disabled={!!saving}
-                                onClick={() => setEditing(row.root)}
-                              />
-                            </span>
-                          )}
-                        </NavigationCard>
+                <>
+                  {pinned.length > 0 && (
+                    <ul className={styles.list} aria-label="Pinned threads">
+                      {pinned.map(renderRow)}
+                    </ul>
+                  )}
+                  <ul className={styles.list} aria-label="Named threads">
+                    {active.map(renderRow)}
+                  </ul>
+                  {finished.length > 0 && (
+                    <section aria-label="Done threads">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-expanded={showDone}
+                        onClick={() => setShowDone((shown) => !shown)}
+                      >
+                        {showDone ? (
+                          <CaretDownIcon size="1rem" aria-hidden="true" />
+                        ) : (
+                          <CaretRightIcon size="1rem" aria-hidden="true" />
+                        )}
+                        Done ({finished.length})
+                      </Button>
+                      {showDone && (
+                        <ul className={styles.list} aria-label="Done threads">
+                          {finished.map(renderRow)}
+                        </ul>
                       )}
-                    </li>
-                  ))}
-                </ul>
+                    </section>
+                  )}
+                </>
               )}
               {shared.partial && (
                 <p className={`text-caption text-subtle ${styles.notice}`}>

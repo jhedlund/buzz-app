@@ -66,12 +66,15 @@ async function fixture({
   writable = true,
   hold,
   holdActivity,
+  marks,
 }: {
   empty?: boolean;
   writable?: boolean;
   hold?: Promise<void>;
   /** Holds every reply read open until it resolves. */
   holdActivity?: Promise<void>;
+  /** Private pin and done records by coordinate; omitted: no host for them. */
+  marks?: Record<string, unknown>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   // The relay's current heads and stored replies; a test changes them as the
@@ -128,7 +131,22 @@ async function fixture({
     replay?: boolean | undefined;
     followed?: readonly string[];
   } = {};
+  const records = marks;
+  const writeThreadMarks = vi.fn(
+    async (
+      coordinate: string,
+      update: (current: unknown) => Record<string, unknown>,
+    ) => {
+      if (!records) throw new Error("no host");
+      records[coordinate] = update(records[coordinate]);
+      return records[coordinate];
+    },
+  );
   const session = {
+    ...(records && {
+      readThreadMarks: vi.fn(async (coordinate: string) => records[coordinate]),
+      writeThreadMarks,
+    }),
     artifacts: {
       follow: vi.fn((ids: readonly string[], listener: typeof live.titles) => {
         live.followed = ids;
@@ -173,7 +191,18 @@ async function fixture({
       />,
     );
   const view = mount();
-  return { publish, open, snapshotRead, read, live, now, relay, view, mount };
+  return {
+    publish,
+    open,
+    snapshotRead,
+    read,
+    live,
+    now,
+    relay,
+    view,
+    mount,
+    writeThreadMarks,
+  };
 }
 const rows = async () =>
   within(await screen.findByRole("list", { name: "Named threads" }))
@@ -527,4 +556,122 @@ it("reads a restored thread's replies again, even when its successor is older", 
     ]),
   );
   expect(historyReads()).toBe(2);
+});
+
+const A = "a".repeat(64);
+const B = "b".repeat(64);
+const C = "c".repeat(64);
+const list = async (name: string) =>
+  within(await screen.findByRole("list", { name }))
+    .queryAllByRole("listitem")
+    .map((item) => item.textContent?.split("·")[0]?.trim());
+
+it("shows pinned threads first and done ones collapsed, a pinned done one staying pinned", async () => {
+  const later = Date.now() + 60_000;
+  await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: {
+          [B]: { pinned: true, updatedAt: 1 },
+          [C]: { pinned: false, updatedAt: 1 },
+        },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  await waitFor(async () =>
+    expect(await list("Named threads")).toEqual(["Launch planalpha"]),
+  );
+  expect(
+    screen.getByRole("button", { name: "Reopen Bug triage" }),
+  ).toBeInTheDocument();
+  const toggle = screen.getByRole("button", { name: "Done (1)" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(toggle);
+  expect(await list("Done threads")).toEqual(["Retro notesalpha"]);
+});
+
+it("pins and marks done by changing one root of the latest record", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+    },
+  });
+  await screen.findByRole("list", { name: "Pinned threads" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await waitFor(async () =>
+    expect(await list("Pinned threads")).toEqual([
+      "Launch planalpha",
+      "Retro notesalpha",
+    ]),
+  );
+  const [coordinate, update] = f.writeThreadMarks.mock.calls[0] ?? [];
+  expect(coordinate).toBe("thread-pins");
+  expect(update?.(undefined)).toMatchObject({
+    version: 1,
+    roots: { [A]: { pinned: true } },
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark done Bug triage" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  expect(f.writeThreadMarks.mock.calls[1]?.[0]).toBe("thread-done");
+});
+
+it("reopens a done thread once it has newer activity", async () => {
+  // Marked done before Launch plan's reply at now - 10.
+  const before = (Math.floor(Date.now() / 1000) - 100) * 1000;
+  await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: { [A]: { done: true, updatedAt: before } },
+      },
+    },
+  });
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("writes nothing over a record it can't read", async () => {
+  const f = await fixture({
+    marks: { "thread-pins": { version: 7 } },
+  });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "couldn't be read",
+  );
+  expect(
+    screen.queryByRole("button", { name: "Pin Launch plan" }),
+  ).not.toBeInTheDocument();
+  expect(f.writeThreadMarks).not.toHaveBeenCalled();
+});
+
+it("offers no pin or done without the host's private records", async () => {
+  await fixture();
+  await rows();
+  expect(
+    screen.queryByRole("button", { name: /^Pin / }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /^Mark done / }),
+  ).not.toBeInTheDocument();
 });
