@@ -62,6 +62,12 @@ import {
 import { useThreadSignals, workingDuration } from "./thread-signals";
 
 const ALL = "";
+type MarkChange = Readonly<{
+  kind: MarkKind;
+  root: string;
+  on: boolean;
+  at: number;
+}>;
 
 export function ThreadsPage({
   relay,
@@ -192,9 +198,30 @@ export function ThreadsView({
   // and write; without it the page shows neither. Read on open and Refresh.
   const readMarks = session.readThreadMarks;
   const writeMarks = session.writeThreadMarks;
-  const [marks, setMarks] = useState<
+  // What the relay last said, and the changes not yet saved: the page shows
+  // the saved marks with every pending change applied, so a read or a
+  // write's result never hides a change still in the queue.
+  const [saved, setSaved] = useState<
     Readonly<{ pins: Marks; done: Marks }> | undefined
   >();
+  const [pending, setPending] = useState<readonly MarkChange[]>([]);
+  const marks = useMemo(
+    () =>
+      saved &&
+      pending.reduce(
+        (shown, change) => ({
+          ...shown,
+          [change.kind]: setMark(
+            shown[change.kind],
+            change.root,
+            change.on,
+            change.at,
+          ),
+        }),
+        saved,
+      ),
+    [saved, pending],
+  );
   const [showDone, setShowDone] = useState(false);
   const [marksGeneration, setMarksGeneration] = useState(0);
   useEffect(() => {
@@ -208,7 +235,7 @@ export function ThreadsView({
       ),
     ).then(
       ([pins, done]) => {
-        if (pins && done) setMarks({ pins, done });
+        if (pins && done) setSaved({ pins, done });
       },
       (cause) => {
         if (!signal.aborted)
@@ -217,25 +244,22 @@ export function ThreadsView({
     );
     return () => controller.abort();
   }, [readMarks, marksGeneration]);
-  // Each change reads the latest record, sets one root and writes it back;
-  // an unreadable record aborts before anything is written.
   // A mark shows at once. Writes run one at a time, each reading the latest
-  // record and changing one root; a failed write re-reads the saved marks.
+  // record and changing one root (an unreadable record aborts before
+  // anything is written). Each result becomes the saved marks; a failed
+  // write drops its change and re-reads them.
   const writes = useRef(Promise.resolve());
   const mark = useCallback(
     (kind: MarkKind, root: string, on: boolean) => {
       if (!writeMarks) return;
       setSaveError(undefined);
-      setMarks(
-        (current) =>
-          current && {
-            ...current,
-            [kind]: setMark(current[kind], root, on, Date.now()),
-          },
-      );
+      const change: MarkChange = { kind, root, on, at: Date.now() };
+      setPending((current) => [...current, change]);
+      const settle = () =>
+        setPending((current) => current.filter((c) => c !== change));
       writes.current = writes.current.then(async () => {
         try {
-          const saved = parseMarks(
+          const result = parseMarks(
             kind,
             await writeMarks(
               MARK_COORDINATE[kind],
@@ -247,11 +271,14 @@ export function ThreadsView({
               AbortSignal.timeout(20_000),
             ),
           );
-          if (!!saved.get(root)?.on !== on)
+          setSaved((current) => current && { ...current, [kind]: result });
+          settle();
+          if (!!result.get(root)?.on !== on)
             throw new Error(
               "That changed on another device. Refresh and try again.",
             );
         } catch (cause) {
+          settle();
           setSaveError(cause instanceof Error ? cause.message : String(cause));
           setMarksGeneration((g) => g + 1);
         }
