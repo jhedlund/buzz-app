@@ -100,6 +100,7 @@ import {
   useAttachmentDraft,
   type AttachmentDraft,
 } from "./attachment-draft";
+import { isLargeTextPaste, largePasteFile } from "./large-paste";
 import {
   sendInBackground,
   useBackgroundSendPending,
@@ -1162,6 +1163,9 @@ function Composer({
   /** Nothing was attached, for this one reason. */
   const refuseAttachment = (description: string) =>
     setAttachmentError({ title: "Could not attach file", description });
+  /** A large paste that became this attachment, offered back as text. */
+  const [largePaste, setLargePaste] =
+    useState<Readonly<{ id: string; text: string }>>();
   const focusRestoredDraft = useRef(false);
   const beforeEdit = useRef<
     { value: MentionDraft; restore(): void } | undefined
@@ -1185,6 +1189,7 @@ function Composer({
     // here, inside each keystroke's commit, so fast typing would never let
     // React's nested-update count reset (React error #185).
     if (pasteTooLong) setPasteTooLong(false);
+    if (largePaste) setLargePaste(undefined);
   }, [draft, editing.target]);
   const editScope = useMessageEditScope();
   const editableRows = () =>
@@ -3390,10 +3395,29 @@ function Composer({
             .filter((item) => item.kind === "file")
             .map((item) => item.getAsFile())
             .filter((file): file is File => file !== null);
-          if (!files.length) return;
+          if (files.length) {
+            event.preventDefault();
+            event.stopPropagation();
+            attachFiles(files);
+            return;
+          }
+          // A large plain-text paste into the message becomes a text file.
+          // Where attaching is unavailable or refused, the editor pastes it
+          // as before, without an attachment error.
+          const text = event.clipboardData.getData("text/plain");
+          if (
+            !isLargeTextPaste(text) ||
+            !(event.target instanceof Node) ||
+            !input.current?.contains(event.target) ||
+            !canAttach ||
+            editing.target
+          )
+            return;
+          const [id] = attachFiles([largePasteFile(text, new Date())]) ?? [];
+          if (!id) return;
           event.preventDefault();
           event.stopPropagation();
-          attachFiles(files);
+          setLargePaste({ id, text });
         }}
         aria-label={
           editing.target
@@ -3475,6 +3499,36 @@ function Composer({
             description={attachmentError.description}
             onDismiss={() => setAttachmentError(undefined)}
           />
+        )}
+        {largePaste && (
+          <ToastNotice
+            key={largePaste.id}
+            title="Pasted as a text file"
+            tone="info"
+            timeout={5000}
+            onDismiss={() => setLargePaste(undefined)}
+          >
+            <Button
+              size="compact"
+              onClick={() => {
+                const { id, text } = largePaste;
+                setLargePaste(undefined);
+                if (
+                  input.current?.insertText(
+                    text,
+                    undefined,
+                    undefined,
+                    undefined,
+                    true,
+                    () => setPasteTooLong(true),
+                  )
+                )
+                  attachments.store.remove(id);
+              }}
+            >
+              Paste inline instead
+            </Button>
+          </ToastNotice>
         )}
         <ComposerContext key={editing.target ? "edit" : "reply"}>
           {editing.target ? (
