@@ -500,7 +500,10 @@ and are asked to sign in again in Buzz.
   else changed the title first, nothing is overwritten: refresh and try again.
   On the desktop app, **Pin** keeps a thread in a Pinned section at the top, and **Mark done** moves it into
   a collapsed Done section until it has new activity; a pinned thread stays pinned even when done. Pins and
-  done marks are private to you, follow you across your desktops, and are the ones Buzz 0.x shows. Titles are shared,
+  done marks are private to you, follow you across your desktops, and are the ones Buzz 0.x shows.
+  A thread you follow shows its unread reply count (**Mark read** clears it), and a thread with an agent
+  working in it shows how long it has been working. Unread replies bring a done thread back to Threads.
+  The sidebar's Threads entry shows a dot while a named thread is unread, or how many have agents working. Titles are shared,
   channel-visible data that agents and the `buzz threads title` CLI also set, and Buzz 0.x shows the same
   titles; they are not searchable. A titled thread shows its title under its first message in the channel
   (choose it to open the thread) and on its thread tab. Renaming a thread tab sets the shared title; if that

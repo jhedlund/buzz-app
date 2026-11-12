@@ -142,7 +142,52 @@ async function fixture({
       return records[coordinate];
     },
   );
+  // Thread unread and agent activity, as the session projects them.
+  const signals = {
+    unread: new Map<string, { rootId: string; unreadCount: number }[]>(),
+    agents: {
+      status: "listening",
+      turns: [],
+      typing: [],
+      local: [],
+    } as Record<string, unknown>,
+    listeners: new Set<() => void>(),
+    emit() {
+      for (const listener of [...signals.listeners]) listener();
+    },
+  };
+  const prepareThreadRead = vi.fn(
+    (channel: string, root: string) => async () => {
+      signals.unread.set(
+        channel,
+        (signals.unread.get(channel) ?? []).filter((t) => t.rootId !== root),
+      );
+      signals.emit();
+      return { status: "saved" };
+    },
+  );
   const session = {
+    unread: {
+      activity: (channelId: string) => ({
+        channelId,
+        items: (signals.unread.get(channelId) ?? []).map((t) => ({
+          ...t,
+          channelId,
+        })),
+      }),
+      subscribeActivity: (_: string, listener: () => void) => {
+        signals.listeners.add(listener);
+        return () => signals.listeners.delete(listener);
+      },
+      prepareThreadRead,
+    },
+    agentActivity: {
+      snapshot: () => signals.agents,
+      subscribe: (listener: () => void) => {
+        signals.listeners.add(listener);
+        return () => signals.listeners.delete(listener);
+      },
+    },
     ...(records && {
       readThreadMarks: vi.fn(async (coordinate: string) => records[coordinate]),
       writeThreadMarks,
@@ -202,6 +247,8 @@ async function fixture({
     view,
     mount,
     writeThreadMarks,
+    signals,
+    prepareThreadRead,
   };
 }
 const rows = async () =>
@@ -704,4 +751,117 @@ it("reopens a 0.x done mark when a reply its frontier doesn't list lands in its 
     ).not.toBeInTheDocument(),
   );
   expect((await rows())[0]).toBe("Launch planalpha");
+});
+
+it("shows unread replies on a row, and Mark read clears them", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 3 }]);
+    f.signals.emit();
+  });
+  expect(
+    await screen.findByRole("img", { name: "3 unread replies" }),
+  ).toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark Bug triage read" }),
+  );
+  expect(f.prepareThreadRead).toHaveBeenCalledWith(BETA, B);
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /unread repl/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByRole("button", { name: "Mark Bug triage read" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps a done thread with unread replies under Threads, and a pinned one pinned", async () => {
+  const later = Date.now() + 60_000;
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 1 }]);
+    f.signals.unread.set(ALPHA, [{ rootId: C, unreadCount: 1 }]);
+    f.signals.emit();
+  });
+  await waitFor(async () =>
+    expect(await list("Named threads")).toContain("Bug triagebeta"),
+  );
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+  expect(await list("Pinned threads")).toEqual(["Retro notesalpha"]);
+});
+
+it("shows how long agents have been working in a thread, then clears it", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.agents = {
+      status: "listening",
+      turns: [
+        // Channel-level work is the channel's.
+        {
+          agent: "x",
+          channelId: ALPHA,
+          state: "working",
+          turnId: "t0",
+          timestamp: 1,
+        },
+      ],
+      typing: [],
+      local: [
+        {
+          agent: "y",
+          channelId: ALPHA,
+          threadRootId: A,
+          thread: true,
+          messageId: "m",
+          state: "working",
+          startedAt: Date.now() - 65_000,
+        },
+      ],
+    };
+    f.signals.emit();
+  });
+  expect(
+    await screen.findByRole("img", {
+      name: /^An agent is working for 1m \d+s$/,
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getAllByRole("img", { name: /working/ })).toHaveLength(1);
+  act(() => {
+    f.signals.agents = {
+      status: "listening",
+      turns: [],
+      typing: [],
+      local: [],
+    };
+    f.signals.emit();
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /working/ }),
+    ).not.toBeInTheDocument(),
+  );
 });

@@ -1,4 +1,5 @@
 import type { PluginModule } from "../../plugins/api";
+import { ThreadsBadge } from "./ThreadsBadge";
 import { ThreadsPage } from "./ThreadsPage";
 import { TitleAccessory } from "./TitleAccessory";
 
@@ -33,6 +34,7 @@ export const apply: PluginModule["apply"] = (ctx) => {
     title: "Threads",
     layout: "workspace",
     primary: true,
+    badge: () => <ThreadsBadge relay={relay} />,
     component: () => <ThreadsPage relay={relay} navigator={navigator} />,
   });
   ctx.conversation.registerAccessory({
