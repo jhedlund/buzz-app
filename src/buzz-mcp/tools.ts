@@ -1607,7 +1607,15 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     if (args.title === undefined) return live ?? "No title.";
     const desired = normalizeTitle(required(args, "title"));
     if (!desired) throw new Error("title is empty.");
-    if (args.if_unset === true && live) return `Already titled: ${live}`;
+    if (args.if_unset === true) {
+      if (live) return `Already titled: ${live}`;
+      const first = await firstAgentNamed(
+        client,
+        root === event.id ? event : await tools.event(root),
+      );
+      if (first && first !== client.pubkey)
+        return `Left for ${first}, the first agent the thread names.`;
+    }
     const plan = planTitle(head, desired);
     if (plan.op === "unchanged") return "unchanged";
     await client.publish(await titleRevision(channel, root, plan, desired));
@@ -1659,6 +1667,43 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     return closed === "closed" ? "closed" : "not open";
   },
 };
+
+/** The first agent a thread root names (`p`), before this one. An agent's
+ * profile carries its owner's attestation or says it is one, as the app's
+ * profiles read it; anyone without a profile counts as a person. Undefined
+ * when the root names no agent before this one. */
+async function firstAgentNamed(client: BuzzClient, root: BuzzEvent) {
+  const named = root.tags
+    .filter(([name, value]) => name === "p" && value && HEX.test(value))
+    .map(([, value]) => (value as string).toLowerCase());
+  const before = named.slice(0, Math.max(0, named.indexOf(client.pubkey)));
+  if (!before.length)
+    return named[0] === client.pubkey ? client.pubkey : undefined;
+  const profiles = await client.query([
+    { kinds: [0], authors: [...new Set(before)], limit: before.length },
+  ]);
+  const agent = (pubkey: string) =>
+    profiles.some((profile) => {
+      if (profile.pubkey !== pubkey) return false;
+      if (
+        profile.tags.some(
+          (t) =>
+            t.length === 4 &&
+            t[0] === "auth" &&
+            /^[0-9a-f]{64}$/.test(t[1] ?? "") &&
+            /^[0-9a-f]{128}$/.test(t[3] ?? ""),
+        )
+      )
+        return true;
+      try {
+        const body = JSON.parse(profile.content);
+        return body?.is_agent === true || body?.isAgent === true;
+      } catch {
+        return false;
+      }
+    });
+  return before.find(agent) ?? client.pubkey;
+}
 
 /** The signed request a post belongs to: the turn's triggering message,
  * which a thread reply's flattened reply link cannot name. */

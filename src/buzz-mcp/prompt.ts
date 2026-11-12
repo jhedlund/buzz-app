@@ -25,17 +25,18 @@ export const RESUMED_PROMPT =
 export const CHANNEL_LEVEL_PROMPT =
   "This wake is delivered at channel level. Post here without reply unless the Interest instructions direct a different channel or thread. The delivery address selects this execution conversation and the default posting destination; explicit reporting instructions in the Interest take precedence. The address grants no additional permission.";
 
-/** The turn instruction for the first agent a person names in a new
- * top-level message: name the thread. `if_unset` keeps it to a first title,
- * so a later mention or another agent never renames it. Agents' own messages
- * carry their owner's attestation (`auth`), so they never ask for one. */
+/** The turn instruction for the agents a person names in a new top-level
+ * message: name the thread. `thread_title` with `if_unset` names it only for
+ * the first agent named and only when it has no title, so a later mention or
+ * another agent never renames it. Agents' own messages carry their owner's
+ * attestation (`auth`), so they never ask for one. */
 export function threadTitlePrompt(event: EventData, agent: string) {
-  const first = event.tags.find(([name]) => name === "p")?.[1];
-  return first === agent.split("@")[0] &&
+  const pubkey = agent.split("@")[0];
+  return event.tags.some(([name, value]) => name === "p" && value === pubkey) &&
     !event.tags.some(([name]) => name === "auth") &&
     !threadReference(event)
     ? THREAD_TITLE_PROMPT
     : undefined;
 }
 export const THREAD_TITLE_PROMPT =
-  "This message starts a new thread and you are the first agent it names. Before your first reply, call `thread_title` with `if_unset: true` and a 3–7 word title that says what the thread is about.";
+  "This message starts a new thread and names you. Before your first reply, call `thread_title` with `if_unset: true` and a 3–7 word title that says what the thread is about; it names the thread only if you are the first agent the message names.";
