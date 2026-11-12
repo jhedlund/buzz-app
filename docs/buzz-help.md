@@ -603,9 +603,12 @@ revokes all of them, and a pairing unused for 30 days expires.
 - **Pasted web links** keep their labels when the clipboard's HTML and plain
   text agree, including image alt text. Use ordinary paste; plain-text paste
   uses only the clipboard's plain text.
-- **Long text pastes** that exceed the message limit show an error and leave
-  your draft unchanged. Shorten the text, or save it as a text file and use
-  **Attach files** where uploads are available.
+- **Large text pastes**, over 10,000 characters or 200 lines, attach as a
+  `pasted-text-…txt` file where uploads are available (not while editing a
+  sent message), instead of filling the message. The notice that follows
+  offers **Paste inline instead**. Other pastes that would exceed the message
+  limit show an error and leave your draft unchanged; shorten the text or
+  attach it as a file.
 - In the composer, Enter sends and Shift+Enter adds a new line by default.
   **Settings → Shortcuts → Sending messages → Send with ⌘ Enter** (Ctrl+Enter
   outside Apple platforms) swaps that on this device: Enter adds a line and
