@@ -24,7 +24,7 @@ import {
   type SidebarSortMode,
   type SidebarFilterMode,
 } from "./sidebar-preferences";
-import type { ReadTransport } from "./transport";
+import type { ReadTransport, ThreadMarkCoordinate } from "./transport";
 
 const coordinates = [
   "channel-sections",
@@ -182,7 +182,69 @@ export function nativeSidebar(transport: ReadTransport) {
     if (!confirms(confirmed.payload)) throw new Error(conflict);
     return prepare(confirmed.payload, confirmed.createdAt).result;
   }
+  // Thread pins and done marks: no shared projection, so the caller checks
+  // the payload's shape; only these two coordinates cross this boundary.
+  async function markHead(
+    coordinate: ThreadMarkCoordinate,
+    signal: AbortSignal,
+  ) {
+    if (coordinate !== "thread-pins" && coordinate !== "thread-done")
+      throw new Error("Invalid thread mark coordinate");
+    cancelled(signal);
+    const events = await transport.query(
+      [
+        {
+          kinds: [30078],
+          authors: [viewer],
+          "#d": [coordinate],
+          limit: 1,
+          consistency: "strong",
+        },
+      ],
+      signal,
+    );
+    cancelled(signal);
+    if (!events.length) return { payload: undefined, createdAt: 0 };
+    const raw = await invoke<Record<string, unknown>>("relay_decode_sidebar", {
+      events,
+    });
+    cancelled(signal);
+    if (!(coordinate in raw)) throw new Error("Invalid thread mark record");
+    return { payload: raw[coordinate], createdAt: events[0]?.created_at ?? 0 };
+  }
   return {
+    async readThreadMarks(
+      coordinate: ThreadMarkCoordinate,
+      signal: AbortSignal,
+    ) {
+      return (await markHead(coordinate, signal)).payload;
+    },
+    async writeThreadMarks(
+      coordinate: ThreadMarkCoordinate,
+      update: (current: unknown) => Record<string, unknown>,
+      signal: AbortSignal,
+    ) {
+      const current = await markHead(coordinate, signal);
+      const next = update(current.payload);
+      if (same(current.payload, next)) return current.payload;
+      if (new TextEncoder().encode(JSON.stringify(next)).length > 128 * 1024)
+        throw new Error("Sidebar plaintext budget exceeded");
+      const event = eventDto(
+        await invoke<unknown>("relay_sign_sidebar", {
+          coordinate,
+          payload: next,
+          // After the head, so the new record replaces it on every relay.
+          createdAt: Math.max(
+            Math.floor(Date.now() / 1000),
+            current.createdAt + 1,
+          ),
+        }),
+      );
+      cancelled(signal);
+      if (!writer) throw new Error("Native relay writer is unavailable");
+      await writer.publish(event, signal);
+      return (await markHead(coordinate, signal)).payload;
+    },
     decodeSidebarPreferences: decode,
     async readMainAgent(signal: AbortSignal) {
       const current = await head("main-agent", signal);
