@@ -12,10 +12,10 @@ import {
   readHead,
   type SnapshotRead,
   uuidv5,
-} from "../../features/agents/agent-config-artifacts";
-import type { EventData, RelayEvent } from "../../features/relay/events";
-import type { RelaySession } from "../../features/relay/session";
-import type { RelayWriter } from "../../features/relay/transport";
+} from "../agents/agent-config-artifacts";
+import type { EventData, RelayEvent } from "../relay/events";
+import type { RelaySession } from "../relay/session";
+import type { RelayWriter } from "../relay/transport";
 
 export const THREAD_TITLE_TYPE = "buzz.thread-title";
 export const THREAD_TITLE_NAMESPACE = "2039f9bf-c754-483e-a7cf-56f1ec0e4abe";
@@ -104,20 +104,11 @@ export async function staleChannels(
   return stale;
 }
 
-/** Recent roots kept while a read is in flight, before the titled rows are
- * known: the 0.x desktop's observed-root cap. */
-export const REPLY_BUFFER = 500;
-
-/** Records reply times in place. A root of a titled row (`titled`, keyed by
- * activityKey) keeps its newest reply in `latest`; any other root is kept
- * only in `buffer`, when given, as one of the REPLY_BUFFER most recent.
- * Order-independent. Returns whether a titled row advanced. */
 export function noteReplies(
   events: readonly EventData[],
   channels: ReadonlySet<string>,
   titled: ReadonlySet<string>,
   latest: Map<string, number>,
-  buffer?: Map<string, number>,
 ) {
   let advanced = false;
   for (const event of events) {
@@ -128,17 +119,9 @@ export function noteReplies(
       if (name !== "e" || !value) continue;
       const key = activityKey(channel, value);
       const at = event.created_at;
-      if (titled.has(key)) {
-        if (at <= (latest.get(key) ?? 0)) continue;
-        latest.set(key, at);
-        advanced = true;
-      } else if (buffer) {
-        const was = buffer.get(key) ?? 0;
-        buffer.delete(key);
-        buffer.set(key, Math.max(was, at));
-        const oldest = buffer.keys().next().value;
-        if (buffer.size > REPLY_BUFFER && oldest) buffer.delete(oldest);
-      }
+      if (!titled.has(key) || at <= (latest.get(key) ?? 0)) continue;
+      latest.set(key, at);
+      advanced = true;
     }
   }
   return advanced;
@@ -272,21 +255,29 @@ export class TitleConflict extends Error {
   }
 }
 
-/** Renames (`desired`) or clears (undefined) a title, provided its live head
- * is still `expected`. A lost race is a conflict, never retried: with an
- * expected revision, a retry could only find the same change. Resolves to the
- * new live revision, or undefined once cleared. */
+/** Where a write goes and the live revision the writer last saw: undefined
+ * when the thread had no title. */
+export type TitleTarget = Readonly<{
+  channel: string;
+  root: string;
+  revision?: string | undefined;
+}>;
+
+/** Names (`desired`) or clears (undefined) a thread's title, provided its
+ * live head is still `expected.revision`. A lost race is a conflict, never
+ * retried: with an expected revision, a retry could only find the same
+ * change. Resolves to the new live revision, or undefined once cleared. */
 export async function writeTitle(
   read: SnapshotRead,
   writer: RelayWriter,
-  current: ThreadTitle,
+  expected: TitleTarget,
   desired: string | undefined,
   signal: AbortSignal,
 ) {
   const event = await readHead(
     read,
-    current.channel,
-    await threadTitleId(current.root),
+    expected.channel,
+    await threadTitleId(expected.root),
     signal,
   );
   const head = event && {
@@ -294,12 +285,12 @@ export async function writeTitle(
     deleted: artifactOp(event) === "delete",
     title: tag(event, "title"),
   };
-  if (!head || head.deleted || head.id !== current.revision)
-    throw new TitleConflict();
+  const live = head && !head.deleted ? head.id : undefined;
+  if (live !== expected.revision) throw new TitleConflict();
   const plan = planTitle(head, desired);
-  if (plan.op === "unchanged") return current.revision;
+  if (plan.op === "unchanged") return live;
   const signed: RelayEvent = await writer.sign(
-    await titleRevision(current.channel, current.root, plan, desired),
+    await titleRevision(expected.channel, expected.root, plan, desired),
     signal,
   );
   const delivery = await deliver(writer, signed, signal);

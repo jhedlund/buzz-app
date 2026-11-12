@@ -13,7 +13,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Navigation } from "../../features/navigation/controller";
 import type { ReadFilter, RelayEvent } from "../../features/relay/events";
 import type { RelaySession } from "../../features/relay/session";
-import { titleRevision } from "./thread-titles";
+import { titleRevision } from "../../features/messages/thread-titles";
 import { ThreadsView } from "./ThreadsPage";
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
@@ -71,8 +71,12 @@ async function fixture({
   hold?: Promise<void>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  // The relay's current heads; a test changes them as the relay would.
-  const relay = { heads: [] as RelayEvent[] };
+  // The relay's current heads and stored replies; a test changes them as the
+  // relay would.
+  const relay = {
+    heads: [] as RelayEvent[],
+    replies: [reply("r1", ALPHA, "a".repeat(64), now - 10)] as RelayEvent[],
+  };
   const titles = empty
     ? []
     : [
@@ -99,9 +103,11 @@ async function fixture({
   });
   // A newer reply moves Launch plan to the top.
   const read = vi.fn(async (filters: readonly ReadFilter[]) =>
-    filters[0]?.["#e"]?.includes("a".repeat(64))
-      ? [reply("r1", ALPHA, "a".repeat(64), now - 10)]
-      : [],
+    relay.replies.filter((r) =>
+      r.tags.some(
+        ([k, v]) => k === "e" && filters[0]?.["#e"]?.includes(v ?? ""),
+      ),
+    ),
   );
   const list = {
     status: "ready",
@@ -358,11 +364,10 @@ it("keeps a rename and a reply that arrive while the first read is open", async 
       head.id === "e2" ? renamed : head,
     );
     act(() => f.live.titles?.([renamed]));
-    act(() =>
-      f.live.events?.({
-        events: [reply("r2", ALPHA, "c".repeat(64), f.now)],
-      }),
-    );
+    // The relay stores the reply before it is delivered live.
+    const late = reply("r2", ALPHA, "c".repeat(64), f.now);
+    f.relay.replies.push(late);
+    act(() => f.live.events?.({ events: [late] }));
     // Both are pending until the read settles; no read starts meanwhile.
     expect(f.snapshotRead).toHaveBeenCalledTimes(1);
   } finally {

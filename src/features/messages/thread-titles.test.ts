@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { PublishRejected } from "../../features/relay/outbox";
-import type { ReadFilter, RelayEvent } from "../../features/relay/events";
-import type { RelayWriter } from "../../features/relay/transport";
+import { PublishRejected } from "../relay/outbox";
+import type { ReadFilter, RelayEvent } from "../relay/events";
+import type { RelayWriter } from "../relay/transport";
 import {
   activityKey,
   normalizeTitle,
@@ -15,7 +15,6 @@ import {
   TitleConflict,
   titleRevision,
   noteReplies,
-  REPLY_BUFFER,
   writeTitle,
 } from "./thread-titles";
 
@@ -271,6 +270,36 @@ describe("writes", () => {
     expect(f.publish).not.toHaveBeenCalled();
   });
 
+  it("names an untitled thread with create, and a cleared one with restore", async () => {
+    const signal = new AbortController().signal;
+    const untitled = { channel: CHANNEL, root: ROOT };
+    const fresh = fixture(undefined);
+    await expect(
+      writeTitle(fresh.read, fresh.writer, untitled, "New", signal),
+    ).resolves.toBe("new");
+    expect(fresh.publish.mock.calls[0]?.[0].tags).toContainEqual([
+      "op",
+      "create",
+    ]);
+    const deletion = await titleRevision(CHANNEL, ROOT, {
+      op: "delete",
+      prev: "e1",
+    });
+    const cleared = fixture(event("e2", deletion.tags));
+    await expect(
+      writeTitle(cleared.read, cleared.writer, untitled, "New", signal),
+    ).resolves.toBe("new");
+    const tags = cleared.publish.mock.calls[0]?.[0].tags;
+    expect(tags).toContainEqual(["op", "restore"]);
+    expect(tags).toContainEqual(["prev", "e2"]);
+    // Expecting no title while one is live is a conflict.
+    const taken = fixture(await titleEvent("e1", "Theirs"));
+    await expect(
+      writeTitle(taken.read, taken.writer, untitled, "New", signal),
+    ).rejects.toBeInstanceOf(TitleConflict);
+    expect(taken.publish).not.toHaveBeenCalled();
+  });
+
   it("reports a conflict when the head moved or a CAS race is lost", async () => {
     const signal = new AbortController().signal;
     const moved = fixture(await titleEvent("e9", "Theirs"));
@@ -361,29 +390,5 @@ describe("live updates", () => {
       ),
     ).toBe(false);
     expect([...latest]).toEqual([[key, 300]]);
-  });
-
-  it("buffers at most the most recent untitled roots while a read is open", () => {
-    const joined = new Set([CHANNEL]);
-    const buffer = new Map<string, number>();
-    const root = (i: number) => i.toString(16).padStart(64, "0");
-    const replies = Array.from({ length: REPLY_BUFFER + 20 }, (_, i) =>
-      reply(`r${i}`, CHANNEL, root(i), 1000 + i),
-    );
-    noteReplies(replies, joined, new Set(), new Map(), buffer);
-    expect(buffer.size).toBe(REPLY_BUFFER);
-    expect(buffer.has(activityKey(CHANNEL, root(0)))).toBe(false);
-    expect(buffer.get(activityKey(CHANNEL, root(REPLY_BUFFER + 19)))).toBe(
-      1000 + REPLY_BUFFER + 19,
-    );
-    // A new reply to a buffered root makes it the most recent, keeping its newest time.
-    noteReplies(
-      [reply("again", CHANNEL, root(20), 5)],
-      joined,
-      new Set(),
-      new Map(),
-      buffer,
-    );
-    expect([...buffer].at(-1)).toEqual([activityKey(CHANNEL, root(20)), 1020]);
   });
 });
