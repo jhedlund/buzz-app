@@ -104,11 +104,16 @@ export async function staleChannels(
   return stale;
 }
 
+/** Records reply times in place: a root of a titled row (`titled`, keyed by
+ * activityKey) keeps its newest reply in `latest`, and when given, the ids
+ * of the replies in that second in `ids` (Buzz 0.x's activity frontier).
+ * Order-independent. Returns whether a titled row's frontier changed. */
 export function noteReplies(
   events: readonly EventData[],
   channels: ReadonlySet<string>,
   titled: ReadonlySet<string>,
   latest: Map<string, number>,
+  ids?: Map<string, ReadonlySet<string>>,
 ) {
   let advanced = false;
   for (const event of events) {
@@ -119,9 +124,16 @@ export function noteReplies(
       if (name !== "e" || !value) continue;
       const key = activityKey(channel, value);
       const at = event.created_at;
-      if (!titled.has(key) || at <= (latest.get(key) ?? 0)) continue;
-      latest.set(key, at);
-      advanced = true;
+      const was = latest.get(key) ?? 0;
+      if (!titled.has(key) || at < was) continue;
+      if (at > was) {
+        latest.set(key, at);
+        ids?.set(key, new Set([event.id]));
+        advanced = true;
+      } else if (ids && !ids.get(key)?.has(event.id)) {
+        ids.set(key, new Set([...(ids.get(key) ?? []), event.id]));
+        advanced = true;
+      }
     }
   }
   return advanced;
@@ -223,6 +235,8 @@ export async function readActivity(
   session: Pick<RelaySession, "read">,
   titles: readonly ThreadTitle[],
   signal: AbortSignal,
+  /** Filled with each root's newest-second reply ids, when given. */
+  ids?: Map<string, ReadonlySet<string>>,
 ) {
   const latest = new Map<string, number>();
   const roots = new Map<string, string[]>();
@@ -246,6 +260,7 @@ export async function readActivity(
         new Set([channel]),
         new Set(batch.map((root) => activityKey(channel, root))),
         latest,
+        ids,
       );
     } catch (error) {
       signal.throwIfAborted();

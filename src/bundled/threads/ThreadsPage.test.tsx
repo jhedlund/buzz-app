@@ -675,3 +675,33 @@ it("offers no pin or done without the host's private records", async () => {
     screen.queryByRole("button", { name: /^Mark done / }),
   ).not.toBeInTheDocument();
 });
+
+it("reopens a 0.x done mark when a reply its frontier doesn't list lands in its second", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: {
+          [A]: {
+            done: true,
+            updatedAt: 1,
+            activityAt: Math.floor(Date.now() / 1000) - 10,
+            activityIds: ["r1"],
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => f.live.events?.({ events: [reply("r2", ALPHA, A, f.now - 10)] }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: /^Done/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect((await rows())[0]).toBe("Launch planalpha");
+});

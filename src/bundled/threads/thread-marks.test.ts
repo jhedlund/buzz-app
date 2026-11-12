@@ -99,6 +99,10 @@ describe("thread marks", () => {
     const frontier = { on: true, updatedAt: 1, activityAt: 100 };
     expect(isDone(frontier, 100)).toBe(true);
     expect(isDone(frontier, 101)).toBe(false);
+    // A reply in the frontier's second that it doesn't list reopens it.
+    const listed = { ...frontier, activityIds: [A] };
+    expect(isDone(listed, 100, [A])).toBe(true);
+    expect(isDone(listed, 100, [A, B])).toBe(false);
     expect(isDone({ on: false, updatedAt: 1 }, 0)).toBe(false);
     expect(isDone(undefined, 0)).toBe(false);
   });
