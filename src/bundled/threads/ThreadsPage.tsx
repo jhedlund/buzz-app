@@ -224,31 +224,42 @@ export function ThreadsView({
   );
   const [showDone, setShowDone] = useState(false);
   const [marksGeneration, setMarksGeneration] = useState(0);
+  // Reads and writes of the marks run one at a time, so a read never lands
+  // after a later write it doesn't include.
+  const marksQueue = useRef(Promise.resolve());
+  const readSaved = useCallback(
+    async (signal: AbortSignal) => {
+      if (!readMarks) return;
+      const [pins, done] = await Promise.all(
+        (["pins", "done"] as const).map(async (kind) =>
+          parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+        ),
+      );
+      if (pins && done && !signal.aborted) setSaved({ pins, done });
+    },
+    [readMarks],
+  );
   useEffect(() => {
     void marksGeneration;
     if (!readMarks) return;
     const controller = new AbortController();
     const { signal } = controller;
-    Promise.all(
-      (["pins", "done"] as const).map(async (kind) =>
-        parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+    marksQueue.current = marksQueue.current.then(() =>
+      readSaved(AbortSignal.any([signal, AbortSignal.timeout(20_000)])).catch(
+        (cause) => {
+          if (!signal.aborted)
+            setSaveError(
+              cause instanceof Error ? cause.message : String(cause),
+            );
+        },
       ),
-    ).then(
-      ([pins, done]) => {
-        if (pins && done) setSaved({ pins, done });
-      },
-      (cause) => {
-        if (!signal.aborted)
-          setSaveError(cause instanceof Error ? cause.message : String(cause));
-      },
     );
     return () => controller.abort();
-  }, [readMarks, marksGeneration]);
-  // A mark shows at once. Writes run one at a time, each reading the latest
-  // record and changing one root (an unreadable record aborts before
-  // anything is written). Each result becomes the saved marks; a failed
-  // write drops its change and re-reads them.
-  const writes = useRef(Promise.resolve());
+  }, [readMarks, readSaved, marksGeneration]);
+  // A mark shows at once. Each write reads the latest record and changes one
+  // root (an unreadable record aborts before anything is written); its
+  // result becomes the saved marks. A failed write drops its own change and
+  // reads the saved marks again, still in turn.
   const mark = useCallback(
     (kind: MarkKind, root: string, on: boolean) => {
       if (!writeMarks) return;
@@ -257,7 +268,7 @@ export function ThreadsView({
       setPending((current) => [...current, change]);
       const settle = () =>
         setPending((current) => current.filter((c) => c !== change));
-      writes.current = writes.current.then(async () => {
+      marksQueue.current = marksQueue.current.then(async () => {
         try {
           const result = parseMarks(
             kind,
@@ -280,11 +291,11 @@ export function ThreadsView({
         } catch (cause) {
           settle();
           setSaveError(cause instanceof Error ? cause.message : String(cause));
-          setMarksGeneration((g) => g + 1);
+          await readSaved(AbortSignal.timeout(20_000)).catch(() => {});
         }
       });
     },
-    [writeMarks],
+    [writeMarks, readSaved],
   );
 
   const refresh = () => {
