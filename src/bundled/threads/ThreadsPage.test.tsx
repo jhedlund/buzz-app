@@ -166,6 +166,9 @@ async function fixture({
       return { status: "saved" };
     },
   );
+  const readThreadMarks = vi.fn(async (coordinate: string) =>
+    records ? records[coordinate] : undefined,
+  );
   const session = {
     unread: {
       activity: (channelId: string) => ({
@@ -189,7 +192,7 @@ async function fixture({
       },
     },
     ...(records && {
-      readThreadMarks: vi.fn(async (coordinate: string) => records[coordinate]),
+      readThreadMarks,
       writeThreadMarks,
     }),
     artifacts: {
@@ -247,6 +250,7 @@ async function fixture({
     view,
     mount,
     writeThreadMarks,
+    readThreadMarks,
     signals,
     prepareThreadRead,
   };
@@ -952,4 +956,50 @@ it("orders row actions Rename, Mark read, Done, Pin and keeps a set pin or done 
   expect(reveal("Unpin Launch plan")).toBe(false);
   expect(reveal("Mark done Launch plan")).toBe(true);
   expect(reveal("Rename Launch plan")).toBe(true);
+});
+
+it("keeps a later pin when an earlier one fails while it is still queued", async () => {
+  const f = await fixture({ marks: {} });
+  await screen.findByRole("button", { name: "Pin Launch plan" });
+  const held = () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release };
+  };
+  const first = held();
+  const second = held();
+  const write = f.writeThreadMarks.getMockImplementation();
+  f.writeThreadMarks
+    .mockImplementationOnce(async () => {
+      await first.gate;
+      throw new Error("Relay offline");
+    })
+    .mockImplementationOnce(async (...args) => {
+      await second.gate;
+      return write?.(...args);
+    });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Pin Bug triage" }));
+  expect(await list("Pinned threads")).toEqual([
+    "Launch planalpha",
+    "Bug triagebeta",
+  ]);
+  // The first fails, and its recovery read (no pins saved yet) lands while
+  // the second is still being saved.
+  const reads = f.readThreadMarks.mock.calls.length;
+  first.release();
+  await waitFor(() =>
+    expect(f.readThreadMarks.mock.calls.length).toBeGreaterThan(reads + 1),
+  );
+  await waitFor(() => expect(f.writeThreadMarks).toHaveBeenCalledTimes(2));
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  second.release();
+  await waitFor(async () =>
+    expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("Relay offline");
 });
