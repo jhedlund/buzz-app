@@ -892,3 +892,64 @@ it("loads a thread root unread state hasn't seen before marking the thread read"
   expect(f.prepareThreadRead).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it("moves a row as soon as it is marked, and re-reads the saved marks if the save fails", async () => {
+  const f = await fixture({ marks: {} });
+  await rows();
+  await screen.findByRole("button", { name: "Pin Launch plan" });
+  let fail = (_: Error) => {};
+  f.writeThreadMarks.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark done Bug triage" }),
+  );
+  // Shown before the relay answers.
+  expect(screen.getByRole("button", { name: "Done (1)" })).toBeInTheDocument();
+  expect(f.writeThreadMarks).toHaveBeenCalledTimes(1);
+  act(() => fail(new Error("Relay offline")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Relay offline");
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: /^Done/ }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
+it("orders row actions Rename, Mark read, Done, Pin and keeps a set pin or done mark shown", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [A]: { pinned: true, updatedAt: 1 } },
+      },
+    },
+  });
+  act(() => {
+    f.signals.unread.set(ALPHA, [{ rootId: A, unreadCount: 1 }]);
+    f.signals.emit();
+  });
+  const pin = await screen.findByRole("button", { name: "Unpin Launch plan" });
+  const row = pin.closest("li") as HTMLElement;
+  expect(
+    within(row)
+      .getAllByRole("button")
+      .slice(1)
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual([
+    "Rename Launch plan",
+    "Mark Launch plan read",
+    "Mark done Launch plan",
+    "Unpin Launch plan",
+  ]);
+  const reveal = (name: string) =>
+    within(row)
+      .getByRole("button", { name })
+      .parentElement?.hasAttribute("data-reveal");
+  expect(reveal("Unpin Launch plan")).toBe(false);
+  expect(reveal("Mark done Launch plan")).toBe(true);
+  expect(reveal("Rename Launch plan")).toBe(true);
+});
