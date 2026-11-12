@@ -7246,3 +7246,24 @@ it("inactive entry sees nothing until the open visit resumes", async () => {
     expect(h.journal()?.state.frontiers[`seen:msg:${mention.id}`]).toBe(100),
   );
 });
+
+it("prepares a thread read once a verified read brings in a root it had not seen", async () => {
+  const h = setup();
+  h.grant("room");
+  const root = message(h.alice, "room", "an old root", 11);
+  const reply = message(h.alice, "room", "a new reply", 13, [
+    ["e", root.id, "", "reply"],
+    ["p", h.viewer.pubkey],
+  ]);
+  h.emit([reply]);
+  const unread = h.session.unread;
+  expect(() => unread.prepareThreadRead("room", root.id)).toThrow();
+  // The Threads page's recovery: read the root by id, then prepare again.
+  h.query.mockImplementation(async (filters) =>
+    filters.some((filter) => filter.ids?.includes(root.id)) ? [root] : [],
+  );
+  await h.session.read([{ ids: [root.id], "#h": ["room"], limit: 1 }]);
+  await expect(
+    unread.prepareThreadRead("room", root.id)(),
+  ).resolves.toBeDefined();
+});
