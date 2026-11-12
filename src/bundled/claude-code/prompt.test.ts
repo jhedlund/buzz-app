@@ -531,7 +531,7 @@ it("tells a turn a mention starts what it owes the mention, and a wake's turn no
   expect(system).not.toContain("belongs to a different session of you");
 });
 
-it("asks only the first agent a person names in a new top-level message to title it", () => {
+it("asks the agents a person names in a new top-level message to title it", () => {
   const ask = "call `thread_title` with `if_unset: true`";
   const turn = (
     tags: string[][],
@@ -549,13 +549,15 @@ it("asks only the first agent a person names in a new top-level message to title
       ...extra,
     });
   expect(turn([["p", agent]])).toContain(ask);
-  // Another agent was named first.
+  // Named after someone else: the tool decides who is the first agent.
   expect(
     turn([
       ["p", bob],
       ["p", agent],
     ]),
-  ).not.toContain(ask);
+  ).toContain(ask);
+  // Not named.
+  expect(turn([["p", bob]])).not.toContain(ask);
   // An agent's own message carries its owner's attestation.
   expect(
     turn([

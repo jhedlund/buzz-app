@@ -39,7 +39,7 @@ it("tells a turn a mention starts what it owes the mention, and a wake's turn no
   expect(instructions).not.toContain("MUST publish");
 });
 
-it("asks the first agent a person names in a new top-level message to title it", () => {
+it("asks the agents a person names in a new top-level message to title it", () => {
   const ask = "call `thread_title` with `if_unset: true`";
   const agent = "c".repeat(64);
   const mention = (tags: string[][]) =>
@@ -56,6 +56,9 @@ it("asks the first agent a person names in a new top-level message to title it",
       root,
       "hi",
     ),
+  ).toContain(ask);
+  expect(
+    turnInput(agent, mention([["p", "b".repeat(64)]]), root, "hi"),
   ).not.toContain(ask);
   expect(
     turnInput(

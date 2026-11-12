@@ -4818,3 +4818,44 @@ it("restores a cleared thread title on the next set", async () => {
   expect(published[0]?.tags).toContainEqual(["op", "restore"]);
   expect(published[0]?.tags).toContainEqual(["prev", "d".repeat(64)]);
 });
+
+it("names a thread only for the first agent its root names, past any people", async () => {
+  const root = "a".repeat(64);
+  const person = "d".repeat(64);
+  const other = "e".repeat(64);
+  const profile = (pubkey: string, agent: boolean) =>
+    event({
+      id: pubkey.replace(/./g, "9"),
+      pubkey,
+      kind: 0,
+      tags: agent ? [["auth", alice, "", "f".repeat(128)]] : [],
+      content: "{}",
+    });
+  const start = (named: string[]) =>
+    fake([
+      event({
+        id: root,
+        kind: 9,
+        tags: [["h", "chan"], ...named.map((p) => ["p", p])],
+      }),
+      profile(person, false),
+      profile(other, true),
+    ]);
+  const ask = { title: "Launch plan", if_unset: true };
+  // A person first, then this agent: it is the first agent named.
+  const humanFirst = start([person, me]);
+  await expect(
+    callTool(humanFirst.client, { channel: "chan", root }, "thread_title", ask),
+  ).resolves.toBe(`titled ${root}: Launch plan`);
+  // Another agent first: it is left to them.
+  const agentFirst = start([person, other, me]);
+  await expect(
+    callTool(agentFirst.client, { channel: "chan", root }, "thread_title", ask),
+  ).resolves.toBe(`Left for ${other}, the first agent the thread names.`);
+  expect(agentFirst.published).toEqual([]);
+  // Without if_unset, an explicit request still sets it.
+  await callTool(agentFirst.client, { channel: "chan", root }, "thread_title", {
+    title: "Launch plan",
+  });
+  expect(agentFirst.published).toHaveLength(1);
+});
