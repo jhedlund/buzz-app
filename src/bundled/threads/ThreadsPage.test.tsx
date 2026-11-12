@@ -122,7 +122,10 @@ async function fixture({
   };
   const live: {
     titles?: ((events: readonly RelayEvent[]) => void) | undefined;
-    events?: ((batch: { events: readonly RelayEvent[] }) => void) | undefined;
+    events?:
+      | ((batch: { events: readonly RelayEvent[]; replay?: boolean }) => void)
+      | undefined;
+    replay?: boolean | undefined;
     followed?: readonly string[];
   } = {};
   const session = {
@@ -135,12 +138,15 @@ async function fixture({
         };
       }),
     },
-    subscribeLive: vi.fn((listener: typeof live.events) => {
-      live.events = listener;
-      return () => {
-        live.events = undefined;
-      };
-    }),
+    subscribeLive: vi.fn(
+      (listener: typeof live.events, options?: { replay?: boolean }) => {
+        live.events = listener;
+        live.replay = options?.replay;
+        return () => {
+          live.events = undefined;
+        };
+      },
+    ),
     channels: {
       ensureList: () => () => {},
       subscribeList: () => () => {},
@@ -251,6 +257,24 @@ it("draws rows by title time before any reply read returns, then reorders", asyn
     release();
   }
   await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+});
+
+it("takes a reply missed while disconnected from the reconnect replay", async () => {
+  const f = await fixture();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  await waitFor(() => expect(f.read).toHaveBeenCalledTimes(2));
+  expect(f.live.replay).toBe(true);
+  f.view.unmount();
+  // After a reconnect, the route replays a reply sent while offline.
+  act(() =>
+    f.live.events?.({
+      events: [reply("r8", ALPHA, "c".repeat(64), f.now)],
+      replay: true,
+    }),
+  );
+  f.mount();
+  expect((await rows())[0]).toBe("Retro notesalpha");
+  expect(f.read).toHaveBeenCalledTimes(2);
 });
 
 it("reopens with no relay reads and keeps replies that arrived while closed", async () => {
