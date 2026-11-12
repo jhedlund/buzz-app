@@ -121,13 +121,20 @@ export function setMark(
 export const markedRoots = (marks: Marks) =>
   new Set([...marks].filter(([, mark]) => mark.on).map(([root]) => root));
 
-/** Done only while nothing has happened since it was marked: activity in a
- * later second than the mark's frontier, or without one, after the mark,
- * reopens it. Same-second ids aren't tracked here, so that second counts as
- * quiet. */
-export function isDone(mark: Mark | undefined, activeAt: number) {
+/** Done only while nothing has happened since it was marked, by Buzz 0.x's
+ * rule: with a frontier, activity in a later second, or a reply in its second
+ * that the frontier doesn't list, reopens it; without one, activity after the
+ * mark does. `ids` are the replies in the thread's `activeAt` second. */
+export function isDone(
+  mark: Mark | undefined,
+  activeAt: number,
+  ids: readonly string[] = [],
+) {
   if (!mark?.on) return false;
-  return mark.activityAt !== undefined
-    ? activeAt <= mark.activityAt
-    : activeAt * 1000 <= mark.updatedAt;
+  if (mark.activityAt === undefined) return activeAt * 1000 <= mark.updatedAt;
+  const frontier = mark.activityIds ?? [];
+  return (
+    activeAt < mark.activityAt ||
+    (activeAt === mark.activityAt && ids.every((id) => frontier.includes(id)))
+  );
 }

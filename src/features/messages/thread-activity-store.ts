@@ -18,9 +18,13 @@ type Session = Pick<
   "snapshotRead" | "artifacts" | "channels" | "read" | "subscribeLive"
 >;
 
+/** A titled thread's newest reply second, and the ids of its replies in
+ * that second (Buzz 0.x's activity frontier, which done marks compare). */
+export type ThreadFrontier = Readonly<{ at: number; ids: readonly string[] }>;
+
 export type ThreadActivityStore = Readonly<{
   /** By activityKey(channel, root); titled threads with a known reply only. */
-  snapshot(): ReadonlyMap<string, number>;
+  snapshot(): ReadonlyMap<string, ThreadFrontier>;
   subscribe(listener: () => void): () => void;
   /** Reads every title and its replies again. */
   refresh(): void;
@@ -46,13 +50,19 @@ function createStore(session: Session): ThreadActivityStore {
   const titles = threadTitleStore(session);
   const listeners = new Set<() => void>();
   const latest = new Map<string, number>();
+  const ids = new Map<string, ReadonlySet<string>>();
   /** Titles whose replies were read, or are being read. */
   const read = new Set<string>();
-  let snapshot: ReadonlyMap<string, number> = new Map();
+  let snapshot: ReadonlyMap<string, ThreadFrontier> = new Map();
   let controller = new AbortController();
   let started = false;
   const publish = () => {
-    snapshot = new Map(latest);
+    snapshot = new Map(
+      [...latest].map(([key, at]) => [
+        key,
+        { at, ids: [...(ids.get(key) ?? [])].sort() },
+      ]),
+    );
     for (const listener of [...listeners]) listener();
   };
   const onTitles = () => {
@@ -60,23 +70,35 @@ function createStore(session: Session): ThreadActivityStore {
     if (!current) return;
     let dropped = false;
     for (const key of latest.keys())
-      if (!current.has(key)) dropped = latest.delete(key);
+      if (!current.has(key)) {
+        dropped = latest.delete(key);
+        ids.delete(key);
+      }
     for (const key of read) if (!current.has(key)) read.delete(key);
     if (dropped) publish();
     const fresh = [...current].filter(([key]) => !read.has(key));
     if (!fresh.length) return;
     for (const [key] of fresh) read.add(key);
     const { signal } = controller;
+    const seen = new Map<string, ReadonlySet<string>>();
     readActivity(
       session,
       fresh.map(([, title]) => title),
       signal,
+      seen,
     ).then(
       (times) => {
         const now = titles.snapshot().titles;
-        for (const [key, at] of times)
-          if (now?.has(key))
-            latest.set(key, Math.max(at, latest.get(key) ?? 0));
+        for (const [key, at] of times) {
+          const was = latest.get(key) ?? 0;
+          if (!now?.has(key) || at < was) continue;
+          const found = seen.get(key) ?? new Set<string>();
+          ids.set(
+            key,
+            at > was ? found : new Set([...(ids.get(key) ?? []), ...found]),
+          );
+          latest.set(key, at);
+        }
         publish();
       },
       () => {
@@ -97,7 +119,7 @@ function createStore(session: Session): ThreadActivityStore {
         const channels = new Set([...current.values()].map((t) => t.channel));
         // Copies only when a titled row's time actually advances; a replayed
         // or duplicate reply changes nothing.
-        if (noteReplies(events, channels, keys, latest)) publish();
+        if (noteReplies(events, channels, keys, latest, ids)) publish();
       },
       { replay: true },
     );
