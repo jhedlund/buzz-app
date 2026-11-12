@@ -261,7 +261,7 @@ export function ThreadsView({
           ...t,
           activeAt: Math.max(
             t.updatedAt,
-            activity.get(activityKey(t.channel, t.root)) ?? 0,
+            activity.get(activityKey(t.channel, t.root))?.at ?? 0,
           ),
         }),
       ),
@@ -314,9 +314,19 @@ export function ThreadsView({
     .map((id) => ({ value: id, label: names.get(id) ?? "Conversation" }))
     .sort((a, b) => a.label.localeCompare(b.label));
 
+  // The replies in a row's newest second count only when that second is a
+  // reply's, not its title's.
+  const done = (row: Row) => {
+    const frontier = activity.get(activityKey(row.channel, row.root));
+    return isDone(
+      marks?.done.get(row.root),
+      row.activeAt,
+      frontier?.at === row.activeAt ? frontier.ids : [],
+    );
+  };
   const renderRow = (row: Row) => {
     const isPinned = !!marks?.pins.get(row.root)?.on;
-    const isDoneRow = isDone(marks?.done.get(row.root), row.activeAt);
+    const isDoneRow = done(row);
     return (
       <li key={row.root} className={styles.row}>
         {editing === row.root ? (
@@ -407,9 +417,7 @@ export function ThreadsView({
   const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
   const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
   // Pinned wins over done for placement: a pinned done thread stays pinned.
-  const finished = unpinned.filter((r) =>
-    isDone(marks?.done.get(r.root), r.activeAt),
-  );
+  const finished = unpinned.filter((r) => done(r));
   const active = unpinned.filter((r) => !finished.includes(r));
 
   return (
