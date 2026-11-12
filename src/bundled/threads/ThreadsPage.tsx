@@ -195,7 +195,6 @@ export function ThreadsView({
   const [marks, setMarks] = useState<
     Readonly<{ pins: Marks; done: Marks }> | undefined
   >();
-  const [marking, setMarking] = useState<string>();
   const [showDone, setShowDone] = useState(false);
   const [marksGeneration, setMarksGeneration] = useState(0);
   useEffect(() => {
@@ -220,34 +219,43 @@ export function ThreadsView({
   }, [readMarks, marksGeneration]);
   // Each change reads the latest record, sets one root and writes it back;
   // an unreadable record aborts before anything is written.
+  // A mark shows at once. Writes run one at a time, each reading the latest
+  // record and changing one root; a failed write re-reads the saved marks.
+  const writes = useRef(Promise.resolve());
   const mark = useCallback(
-    async (kind: MarkKind, root: string, on: boolean) => {
+    (kind: MarkKind, root: string, on: boolean) => {
       if (!writeMarks) return;
-      setMarking(root);
       setSaveError(undefined);
-      try {
-        const saved = parseMarks(
-          kind,
-          await writeMarks(
-            MARK_COORDINATE[kind],
-            (current) =>
-              encodeMarks(
-                kind,
-                setMark(parseMarks(kind, current), root, on, Date.now()),
-              ),
-            AbortSignal.timeout(20_000),
-          ),
-        );
-        setMarks((current) => current && { ...current, [kind]: saved });
-        if (!!saved.get(root)?.on !== on)
-          throw new Error(
-            "That changed on another device. Refresh and try again.",
+      setMarks(
+        (current) =>
+          current && {
+            ...current,
+            [kind]: setMark(current[kind], root, on, Date.now()),
+          },
+      );
+      writes.current = writes.current.then(async () => {
+        try {
+          const saved = parseMarks(
+            kind,
+            await writeMarks(
+              MARK_COORDINATE[kind],
+              (current) =>
+                encodeMarks(
+                  kind,
+                  setMark(parseMarks(kind, current), root, on, Date.now()),
+                ),
+              AbortSignal.timeout(20_000),
+            ),
           );
-      } catch (cause) {
-        setSaveError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setMarking(undefined);
-      }
+          if (!!saved.get(root)?.on !== on)
+            throw new Error(
+              "That changed on another device. Refresh and try again.",
+            );
+        } catch (cause) {
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+          setMarksGeneration((g) => g + 1);
+        }
+      });
     },
     [writeMarks],
   );
@@ -437,57 +445,67 @@ export function ThreadsView({
               }
             />
             {(writer || marks || unread > 0) && (
+              // Pin is last, Done before it, as in Buzz 0.x. Actions show on
+              // hover or keyboard focus; a set pin or done mark stays shown.
               <span className={styles.actions}>
-                {marks && (
-                  <>
+                {writer && (
+                  <span data-reveal="">
                     <IconButton
                       variant="bare"
-                      icon={
-                        isPinned ? (
-                          <PinFilledIcon size={16} />
-                        ) : (
-                          <PinIcon size={16} />
-                        )
-                      }
-                      aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
-                      title={isPinned ? "Unpin" : "Pin"}
-                      disabled={!!marking}
-                      onClick={() => void mark("pins", row.root, !isPinned)}
+                      icon={<PencilSimpleIcon size={16} />}
+                      aria-label={`Rename ${row.title}`}
+                      title="Rename"
+                      disabled={!!saving}
+                      onClick={() => setEditing(row.root)}
                     />
-                    <IconButton
-                      variant="bare"
-                      icon={
-                        isDoneRow ? (
-                          <CheckCircleFilledIcon size={16} />
-                        ) : (
-                          <CheckCircleIcon size={16} />
-                        )
-                      }
-                      aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
-                      title={isDoneRow ? "Reopen" : "Mark done"}
-                      disabled={!!marking}
-                      onClick={() => void mark("done", row.root, !isDoneRow)}
-                    />
-                  </>
+                  </span>
                 )}
                 {unread > 0 && (
-                  <IconButton
-                    variant="bare"
-                    icon={<ChecksIcon size={16} />}
-                    aria-label={`Mark ${row.title} read`}
-                    title="Mark read"
-                    onClick={() => void markRead(row)}
-                  />
+                  <span data-reveal="">
+                    <IconButton
+                      variant="bare"
+                      icon={<ChecksIcon size={16} />}
+                      aria-label={`Mark ${row.title} read`}
+                      title="Mark read"
+                      onClick={() => void markRead(row)}
+                    />
+                  </span>
                 )}
-                {writer && (
-                  <IconButton
-                    variant="bare"
-                    icon={<PencilSimpleIcon size={16} />}
-                    aria-label={`Rename ${row.title}`}
-                    title="Rename"
-                    disabled={!!saving}
-                    onClick={() => setEditing(row.root)}
-                  />
+                {marks && (
+                  <>
+                    <span data-reveal={isDoneRow ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isDoneRow ? (
+                            <CheckCircleFilledIcon size={16} />
+                          ) : (
+                            <CheckCircleIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
+                        aria-pressed={isDoneRow}
+                        title={isDoneRow ? "Reopen" : "Mark done"}
+                        onClick={() => mark("done", row.root, !isDoneRow)}
+                      />
+                    </span>
+                    <span data-reveal={isPinned ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isPinned ? (
+                            <PinFilledIcon size={16} />
+                          ) : (
+                            <PinIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
+                        aria-pressed={isPinned}
+                        title={isPinned ? "Unpin" : "Pin"}
+                        onClick={() => mark("pins", row.root, !isPinned)}
+                      />
+                    </span>
+                  </>
                 )}
               </span>
             )}
