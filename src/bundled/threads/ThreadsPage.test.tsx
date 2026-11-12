@@ -13,7 +13,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Navigation } from "../../features/navigation/controller";
 import type { ReadFilter, RelayEvent } from "../../features/relay/events";
 import type { RelaySession } from "../../features/relay/session";
-import { titleRevision } from "./thread-titles";
+import { titleRevision } from "../../features/messages/thread-titles";
 import { ThreadsView } from "./ThreadsPage";
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
@@ -65,14 +65,24 @@ async function fixture({
   empty = false,
   writable = true,
   hold,
+  holdActivity,
+  marks,
 }: {
   empty?: boolean;
   writable?: boolean;
   hold?: Promise<void>;
+  /** Holds every reply read open until it resolves. */
+  holdActivity?: Promise<void>;
+  /** Private pin and done records by coordinate; omitted: no host for them. */
+  marks?: Record<string, unknown>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  // The relay's current heads; a test changes them as the relay would.
-  const relay = { heads: [] as RelayEvent[] };
+  // The relay's current heads and stored replies; a test changes them as the
+  // relay would.
+  const relay = {
+    heads: [] as RelayEvent[],
+    replies: [reply("r1", ALPHA, "a".repeat(64), now - 10)] as RelayEvent[],
+  };
   const titles = empty
     ? []
     : [
@@ -98,11 +108,14 @@ async function fixture({
     );
   });
   // A newer reply moves Launch plan to the top.
-  const read = vi.fn(async (filters: readonly ReadFilter[]) =>
-    filters[0]?.["#e"]?.includes("a".repeat(64))
-      ? [reply("r1", ALPHA, "a".repeat(64), now - 10)]
-      : [],
-  );
+  const read = vi.fn(async (filters: readonly ReadFilter[]) => {
+    await holdActivity;
+    return relay.replies.filter((r) =>
+      r.tags.some(
+        ([k, v]) => k === "e" && filters[0]?.["#e"]?.includes(v ?? ""),
+      ),
+    );
+  });
   const list = {
     status: "ready",
     channels: [
@@ -112,10 +125,73 @@ async function fixture({
   };
   const live: {
     titles?: ((events: readonly RelayEvent[]) => void) | undefined;
-    events?: ((batch: { events: readonly RelayEvent[] }) => void) | undefined;
+    events?:
+      | ((batch: { events: readonly RelayEvent[]; replay?: boolean }) => void)
+      | undefined;
+    replay?: boolean | undefined;
     followed?: readonly string[];
   } = {};
+  const records = marks;
+  const writeThreadMarks = vi.fn(
+    async (
+      coordinate: string,
+      update: (current: unknown) => Record<string, unknown>,
+    ) => {
+      if (!records) throw new Error("no host");
+      records[coordinate] = update(records[coordinate]);
+      return records[coordinate];
+    },
+  );
+  // Thread unread and agent activity, as the session projects them.
+  const signals = {
+    unread: new Map<string, { rootId: string; unreadCount: number }[]>(),
+    agents: {
+      status: "listening",
+      turns: [],
+      typing: [],
+      local: [],
+    } as Record<string, unknown>,
+    listeners: new Set<() => void>(),
+    emit() {
+      for (const listener of [...signals.listeners]) listener();
+    },
+  };
+  const prepareThreadRead = vi.fn(
+    (channel: string, root: string) => async () => {
+      signals.unread.set(
+        channel,
+        (signals.unread.get(channel) ?? []).filter((t) => t.rootId !== root),
+      );
+      signals.emit();
+      return { status: "saved" };
+    },
+  );
   const session = {
+    unread: {
+      activity: (channelId: string) => ({
+        channelId,
+        items: (signals.unread.get(channelId) ?? []).map((t) => ({
+          ...t,
+          channelId,
+        })),
+      }),
+      subscribeActivity: (_: string, listener: () => void) => {
+        signals.listeners.add(listener);
+        return () => signals.listeners.delete(listener);
+      },
+      prepareThreadRead,
+    },
+    agentActivity: {
+      snapshot: () => signals.agents,
+      subscribe: (listener: () => void) => {
+        signals.listeners.add(listener);
+        return () => signals.listeners.delete(listener);
+      },
+    },
+    ...(records && {
+      readThreadMarks: vi.fn(async (coordinate: string) => records[coordinate]),
+      writeThreadMarks,
+    }),
     artifacts: {
       follow: vi.fn((ids: readonly string[], listener: typeof live.titles) => {
         live.followed = ids;
@@ -125,12 +201,15 @@ async function fixture({
         };
       }),
     },
-    subscribeLive: vi.fn((listener: typeof live.events) => {
-      live.events = listener;
-      return () => {
-        live.events = undefined;
-      };
-    }),
+    subscribeLive: vi.fn(
+      (listener: typeof live.events, options?: { replay?: boolean }) => {
+        live.events = listener;
+        live.replay = options?.replay;
+        return () => {
+          live.events = undefined;
+        };
+      },
+    ),
     channels: {
       ensureList: () => () => {},
       subscribeList: () => () => {},
@@ -148,14 +227,29 @@ async function fixture({
       : undefined,
   } as unknown as RelaySession;
   const open = vi.fn(async () => ({ status: "opened" }));
-  render(
-    <ThreadsView
-      session={session}
-      scope={scope}
-      navigator={{ open } as unknown as Navigation}
-    />,
-  );
-  return { publish, open, snapshotRead, read, live, now, relay };
+  const mount = () =>
+    render(
+      <ThreadsView
+        session={session}
+        scope={scope}
+        navigator={{ open } as unknown as Navigation}
+      />,
+    );
+  const view = mount();
+  return {
+    publish,
+    open,
+    snapshotRead,
+    read,
+    live,
+    now,
+    relay,
+    view,
+    mount,
+    writeThreadMarks,
+    signals,
+    prepareThreadRead,
+  };
 }
 const rows = async () =>
   within(await screen.findByRole("list", { name: "Named threads" }))
@@ -203,6 +297,84 @@ it("filters by channel", async () => {
   await waitFor(async () => expect(await rows()).toEqual(["Bug triagebeta"]));
 });
 
+it("offers a clear-filter button only while a channel is chosen", async () => {
+  await fixture();
+  await rows();
+  expect(
+    screen.queryByRole("button", { name: "Show all channels" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("combobox", { name: "Channel" }));
+  await userEvent.click(await screen.findByRole("option", { name: "alpha" }));
+  await waitFor(async () => expect(await rows()).toHaveLength(2));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Show all channels" }),
+  );
+  expect(await rows()).toHaveLength(3);
+  expect(screen.getByRole("combobox", { name: "Channel" })).toHaveFocus();
+  expect(
+    screen.queryByRole("button", { name: "Show all channels" }),
+  ).not.toBeInTheDocument();
+});
+
+it("draws rows by title time before any reply read returns, then reorders", async () => {
+  let release = () => {};
+  const holdActivity = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = await fixture({ holdActivity });
+  try {
+    await waitFor(() => expect(f.read).toHaveBeenCalled());
+    expect(await rows()).toEqual([
+      "Retro notesalpha",
+      "Bug triagebeta",
+      "Launch planalpha",
+    ]);
+  } finally {
+    release();
+  }
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+});
+
+it("takes a reply missed while disconnected from the reconnect replay", async () => {
+  const f = await fixture();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  await waitFor(() => expect(f.read).toHaveBeenCalledTimes(2));
+  expect(f.live.replay).toBe(true);
+  f.view.unmount();
+  // After a reconnect, the route replays a reply sent while offline.
+  act(() =>
+    f.live.events?.({
+      events: [reply("r8", ALPHA, "c".repeat(64), f.now)],
+      replay: true,
+    }),
+  );
+  f.mount();
+  expect((await rows())[0]).toBe("Retro notesalpha");
+  expect(f.read).toHaveBeenCalledTimes(2);
+});
+
+it("reopens with no relay reads and keeps replies that arrived while closed", async () => {
+  const f = await fixture();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  await waitFor(() => expect(f.read).toHaveBeenCalledTimes(2));
+  const titleReads = f.snapshotRead.mock.calls.length;
+  f.view.unmount();
+  // Bug triage gets a newer reply while the page is closed.
+  act(() =>
+    f.live.events?.({
+      events: [reply("r9", BETA, "b".repeat(64), f.now)],
+    }),
+  );
+  f.mount();
+  expect(await rows()).toEqual([
+    "Bug triagebeta",
+    "Launch planalpha",
+    "Retro notesalpha",
+  ]);
+  expect(f.snapshotRead).toHaveBeenCalledTimes(titleReads);
+  expect(f.read).toHaveBeenCalledTimes(2);
+});
+
 it("renames inline with Enter and cancels with Escape", async () => {
   const f = await fixture();
   await rows();
@@ -227,12 +399,19 @@ it("renames inline with Enter and cancels with Escape", async () => {
   expect(f.publish).toHaveBeenCalledTimes(1);
 });
 
-it("clears a title with a soft delete and removes its row", async () => {
+it("clears a title saved blank with a soft delete and removes its row", async () => {
   const f = await fixture();
   await rows();
+  expect(
+    screen.queryByRole("button", { name: /^Clear title/ }),
+  ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("button", { name: "Clear title Retro notes" }),
+    screen.getByRole("button", { name: "Rename Retro notes" }),
   );
+  await userEvent.clear(
+    screen.getByRole("textbox", { name: "Title for Retro notes" }),
+  );
+  await userEvent.keyboard("{Enter}");
   await waitFor(async () =>
     expect(await rows()).toEqual(["Launch planalpha", "Bug triagebeta"]),
   );
@@ -249,7 +428,11 @@ it("reports a title someone else changed instead of overwriting it", async () =>
     await title("e9", "Theirs", "a".repeat(64), ALPHA, 1),
   ]);
   await userEvent.click(
-    screen.getByRole("button", { name: "Clear title Launch plan" }),
+    screen.getByRole("button", { name: "Rename Launch plan" }),
+  );
+  await userEvent.type(
+    screen.getByRole("textbox", { name: "Title for Launch plan" }),
+    " v2{Enter}",
   );
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Someone else changed this thread's title",
@@ -358,11 +541,10 @@ it("keeps a rename and a reply that arrive while the first read is open", async 
       head.id === "e2" ? renamed : head,
     );
     act(() => f.live.titles?.([renamed]));
-    act(() =>
-      f.live.events?.({
-        events: [reply("r2", ALPHA, "c".repeat(64), f.now)],
-      }),
-    );
+    // The relay stores the reply before it is delivered live.
+    const late = reply("r2", ALPHA, "c".repeat(64), f.now);
+    f.relay.replies.push(late);
+    act(() => f.live.events?.({ events: [late] }));
     // Both are pending until the read settles; no read starts meanwhile.
     expect(f.snapshotRead).toHaveBeenCalledTimes(1);
   } finally {
@@ -421,4 +603,292 @@ it("reads a restored thread's replies again, even when its successor is older", 
     ]),
   );
   expect(historyReads()).toBe(2);
+});
+
+const A = "a".repeat(64);
+const B = "b".repeat(64);
+const C = "c".repeat(64);
+const list = async (name: string) =>
+  within(await screen.findByRole("list", { name }))
+    .queryAllByRole("listitem")
+    .map((item) => item.textContent?.split("·")[0]?.trim());
+
+it("shows pinned threads first and done ones collapsed, a pinned done one staying pinned", async () => {
+  const later = Date.now() + 60_000;
+  await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: {
+          [B]: { pinned: true, updatedAt: 1 },
+          [C]: { pinned: false, updatedAt: 1 },
+        },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  await waitFor(async () =>
+    expect(await list("Named threads")).toEqual(["Launch planalpha"]),
+  );
+  expect(
+    screen.getByRole("button", { name: "Reopen Bug triage" }),
+  ).toBeInTheDocument();
+  const toggle = screen.getByRole("button", { name: "Done (1)" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(toggle);
+  expect(await list("Done threads")).toEqual(["Retro notesalpha"]);
+});
+
+it("pins and marks done by changing one root of the latest record", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+    },
+  });
+  await screen.findByRole("list", { name: "Pinned threads" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await waitFor(async () =>
+    expect(await list("Pinned threads")).toEqual([
+      "Launch planalpha",
+      "Retro notesalpha",
+    ]),
+  );
+  const [coordinate, update] = f.writeThreadMarks.mock.calls[0] ?? [];
+  expect(coordinate).toBe("thread-pins");
+  expect(update?.(undefined)).toMatchObject({
+    version: 1,
+    roots: { [A]: { pinned: true } },
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark done Bug triage" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  expect(f.writeThreadMarks.mock.calls[1]?.[0]).toBe("thread-done");
+});
+
+it("reopens a done thread once it has newer activity", async () => {
+  // Marked done before Launch plan's reply at now - 10.
+  const before = (Math.floor(Date.now() / 1000) - 100) * 1000;
+  await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: { [A]: { done: true, updatedAt: before } },
+      },
+    },
+  });
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("writes nothing over a record it can't read", async () => {
+  const f = await fixture({
+    marks: { "thread-pins": { version: 7 } },
+  });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "couldn't be read",
+  );
+  expect(
+    screen.queryByRole("button", { name: "Pin Launch plan" }),
+  ).not.toBeInTheDocument();
+  expect(f.writeThreadMarks).not.toHaveBeenCalled();
+});
+
+it("offers no pin or done without the host's private records", async () => {
+  await fixture();
+  await rows();
+  expect(
+    screen.queryByRole("button", { name: /^Pin / }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /^Mark done / }),
+  ).not.toBeInTheDocument();
+});
+
+it("reopens a 0.x done mark when a reply its frontier doesn't list lands in its second", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: {
+          [A]: {
+            done: true,
+            updatedAt: 1,
+            activityAt: Math.floor(Date.now() / 1000) - 10,
+            activityIds: ["r1"],
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => f.live.events?.({ events: [reply("r2", ALPHA, A, f.now - 10)] }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: /^Done/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect((await rows())[0]).toBe("Launch planalpha");
+});
+
+it("shows unread replies on a row, and Mark read clears them", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 3 }]);
+    f.signals.emit();
+  });
+  expect(
+    await screen.findByRole("img", { name: "3 unread replies" }),
+  ).toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark Bug triage read" }),
+  );
+  expect(f.prepareThreadRead).toHaveBeenCalledWith(BETA, B);
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /unread repl/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByRole("button", { name: "Mark Bug triage read" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps a done thread with unread replies under Threads, and a pinned one pinned", async () => {
+  const later = Date.now() + 60_000;
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 1 }]);
+    f.signals.unread.set(ALPHA, [{ rootId: C, unreadCount: 1 }]);
+    f.signals.emit();
+  });
+  await waitFor(async () =>
+    expect(await list("Named threads")).toContain("Bug triagebeta"),
+  );
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+  expect(await list("Pinned threads")).toEqual(["Retro notesalpha"]);
+});
+
+it("shows how long agents have been working in a thread, then clears it", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.agents = {
+      status: "listening",
+      turns: [
+        // Channel-level work is the channel's.
+        {
+          agent: "x",
+          channelId: ALPHA,
+          state: "working",
+          turnId: "t0",
+          timestamp: 1,
+        },
+      ],
+      typing: [],
+      local: [
+        {
+          agent: "y",
+          channelId: ALPHA,
+          threadRootId: A,
+          thread: true,
+          messageId: "m",
+          state: "working",
+          startedAt: Date.now() - 65_000,
+        },
+      ],
+    };
+    f.signals.emit();
+  });
+  expect(
+    await screen.findByRole("img", {
+      name: /^An agent is working for 1m \d+s$/,
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getAllByRole("img", { name: /working/ })).toHaveLength(1);
+  act(() => {
+    f.signals.agents = {
+      status: "listening",
+      turns: [],
+      typing: [],
+      local: [],
+    };
+    f.signals.emit();
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /working/ }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
+it("loads a thread root unread state hasn't seen before marking the thread read", async () => {
+  const f = await fixture();
+  await rows();
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 2 }]);
+    f.signals.emit();
+  });
+  // As the session's unread state does for a root it holds no evidence of.
+  f.prepareThreadRead.mockImplementationOnce(() => {
+    throw new Error("Verified readable message evidence unavailable");
+  });
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Mark Bug triage read" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("img", { name: /unread repl/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(f.read).toHaveBeenCalledWith(
+    [{ ids: [B], "#h": [BETA], limit: 1 }],
+    expect.anything(),
+  );
+  expect(f.prepareThreadRead).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

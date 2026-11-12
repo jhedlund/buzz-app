@@ -38,3 +38,45 @@ it("tells a turn a mention starts what it owes the mention, and a wake's turn no
   expect(instructions).not.toContain("MUST reply");
   expect(instructions).not.toContain("MUST publish");
 });
+
+it("asks the agents a person names in a new top-level message to title it", () => {
+  const ask = "call `thread_title` with `if_unset: true`";
+  const agent = "c".repeat(64);
+  const mention = (tags: string[][]) =>
+    ({ ...event, tags: [["h", "chan"], ...tags] }) as EventData;
+  const root = { channelId: "chan", name: "general" };
+  expect(turnInput(agent, mention([["p", agent]]), root, "hi")).toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([
+        ["p", "b".repeat(64)],
+        ["p", agent],
+      ]),
+      root,
+      "hi",
+    ),
+  ).toContain(ask);
+  expect(
+    turnInput(agent, mention([["p", "b".repeat(64)]]), root, "hi"),
+  ).not.toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([
+        ["p", agent],
+        ["e", "d".repeat(64), "", "reply"],
+      ]),
+      root,
+      "hi",
+    ),
+  ).not.toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([["p", agent]]),
+      { ...root, topLevel: true },
+      "hi",
+    ),
+  ).not.toContain(ask);
+});

@@ -90,6 +90,7 @@ export interface RelayWriter {
     signal: AbortSignal,
   ): Promise<string> | Promise<void>;
 }
+export type ThreadMarkCoordinate = "thread-pins" | "thread-done";
 export interface ReadTransport {
   /** Hear the relay refuse this account for the whole community, on any
    * request after connecting: its sign-in ended, or it has no access. One
@@ -185,6 +186,20 @@ export interface ReadTransport {
     expected: string,
     signal: AbortSignal,
   ): Promise<string | undefined>;
+  /** Host-only private records of the viewer's pinned and done threads,
+   * in the shape Buzz 0.x writes: the decoded payload, undefined when there
+   * is no record. The payload's shape is the caller's to check. */
+  readThreadMarks?(
+    coordinate: ThreadMarkCoordinate,
+    signal: AbortSignal,
+  ): Promise<unknown>;
+  /** Reads the latest record, writes `update(current)` unless unchanged, and
+   * resolves to the record read back. `update` throws to abort. */
+  writeThreadMarks?(
+    coordinate: ThreadMarkCoordinate,
+    update: (current: unknown) => Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<unknown>;
   readonly profiling?: RelayProfiler;
   /** Verifies events read back from device storage as a relay read does, with
    * the host's native batch check; only present with one. Rejects on any bad record or host failure. */

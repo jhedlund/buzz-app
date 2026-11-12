@@ -6,10 +6,20 @@ import type { RelayData } from "../../features/relay/service";
 import type { RelaySession } from "../../features/relay/session";
 import {
   ArrowsClockwiseIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  CheckCircleFilledIcon,
+  CheckCircleIcon,
+  ChecksIcon,
   MessageReplyIcon,
   PencilSimpleIcon,
+  PinFilledIcon,
+  PinIcon,
   XIcon,
 } from "../../shared/design-system/icons";
+import { Button } from "../../shared/design-system/ui/Button";
+import { CountBadge } from "../../shared/design-system/ui/CountBadge";
+import { TypingDots } from "../../shared/design-system/ui/TypingDots";
 import { EmptyState } from "../../shared/design-system/ui/EmptyState";
 import { FullPageSurface } from "../../shared/design-system/ui/FullPageSurface";
 import { IconButton } from "../../shared/design-system/ui/IconButton";
@@ -25,22 +35,33 @@ import {
 } from "../../shared/design-system/ui/PanelHeader";
 import { Select } from "../../shared/design-system/ui/Select";
 import { relativeTimestamp } from "../../shared/relative-timestamp";
-import styles from "./Threads.module.css";
+import {
+  threadActivityStore,
+  useThreadActivity,
+} from "../../features/messages/thread-activity-store";
+import {
+  threadTitleStore,
+  useThreadTitles,
+} from "../../features/messages/thread-title-store";
 import {
   activityKey,
   normalizeTitle,
   type Row,
-  readActivity,
-  readTitles,
-  staleChannels,
-  type ThreadTitle,
-  noteReplies,
   writeTitle,
-} from "./thread-titles";
+} from "../../features/messages/thread-titles";
+import styles from "./Threads.module.css";
+import {
+  encodeMarks,
+  isDone,
+  MARK_COORDINATE,
+  type MarkKind,
+  type Marks,
+  parseMarks,
+  setMark,
+} from "./thread-marks";
+import { useThreadSignals, workingDuration } from "./thread-signals";
 
 const ALL = "";
-/** A burst of title changes waits this long, then reads its channels once. */
-const TITLE_DEBOUNCE_MS = 300;
 
 export function ThreadsPage({
   relay,
@@ -149,129 +170,93 @@ export function ThreadsView({
     () => new Map(list.channels.map((c) => [c.id, c.name || "Conversation"])),
     [list.channels],
   );
-  const channelKey = [...names.keys()].sort().join(",");
-  const [titles, setTitles] = useState<readonly ThreadTitle[]>();
-  const [activity, setActivity] = useState<ReadonlyMap<string, number>>(
-    () => new Map(),
+  const store = threadTitleStore(session);
+  const shared = useThreadTitles(session);
+  const titles = useMemo(
+    () => shared.titles && [...shared.titles.values()],
+    [shared.titles],
   );
-  const [partial, setPartial] = useState(false);
-  const [error, setError] = useState<string>();
+  // Rows draw from titles alone, by title time; reply times reorder them as
+  // they arrive and stay for the session, so a reopened page reads nothing.
+  const activity = useThreadActivity(session);
+  const [saveError, setSaveError] = useState<string>();
   const [filter, setFilter] = useState(ALL);
   const [editing, setEditing] = useState<string>();
   const [saving, setSaving] = useState<string>();
-  const [generation, setGeneration] = useState(0);
   const read = session.snapshotRead;
   const writer = session.configArtifactWriter;
+  const error = saveError ?? shared.error;
+  const toolbar = useRef<HTMLDivElement>(null);
 
-  // Settled once, so a background list refresh does not re-read titles.
-  const listReady = list.status === "ready" || list.channels.length > 0;
-  const listError = list.status === "error" ? (list.error ?? "") : undefined;
-  // The relay's current read is the only authority on titles: a live title
-  // revision only marks its channel stale, and a debounced read of the stale
-  // channels replaces their rows. Replies keep the newest time per titled
-  // root, in any order; other roots only in a capped buffer while a read is
-  // in flight, merged once the rows are known. The live routes already carry the joined channels, titles
-  // included, so following them adds no subscriptions.
+  // Pins and done marks are private records only the desktop host can read
+  // and write; without it the page shows neither. Read on open and Refresh.
+  const readMarks = session.readThreadMarks;
+  const writeMarks = session.writeThreadMarks;
+  const [marks, setMarks] = useState<
+    Readonly<{ pins: Marks; done: Marks }> | undefined
+  >();
+  const [marking, setMarking] = useState<string>();
+  const [showDone, setShowDone] = useState(false);
+  const [marksGeneration, setMarksGeneration] = useState(0);
   useEffect(() => {
-    void generation;
-    if (listError !== undefined)
-      return setError(listError || "Couldn't load your channels.");
-    if (!read || !listReady) return;
-    if (!channelKey) return setTitles([]);
-    const ids = channelKey.split(",");
-    const joined = new Set(ids);
+    void marksGeneration;
+    if (!readMarks) return;
     const controller = new AbortController();
     const { signal } = controller;
-    const stale = new Set<string>();
-    const activityRead = new Set<string>();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let reading = false;
-    /** Reply times of titled rows only, and replies held during a read. */
-    const latest = new Map<string, number>();
-    const buffer = new Map<string, number>();
-    let shown: readonly ThreadTitle[] = [];
-    let titled = new Set<string>();
-    const load = async (channels: readonly string[], first: boolean) => {
-      const found = await readTitles(read, channels, signal);
-      const fresh = found.titles.filter(
-        (t) => !activityRead.has(activityKey(t.channel, t.root)),
-      );
-      const times = await readActivity(session, fresh, signal);
-      for (const t of fresh) activityRead.add(activityKey(t.channel, t.root));
-      shown = [
-        ...(first ? [] : shown.filter((t) => !channels.includes(t.channel))),
-        ...found.titles,
-      ];
-      titled = new Set(shown.map((t) => activityKey(t.channel, t.root)));
-      for (const [key, at] of [...times, ...buffer])
-        if (titled.has(key))
-          latest.set(key, Math.max(at, latest.get(key) ?? 0));
-      buffer.clear();
-      // A row that leaves and comes back reads its replies again.
-      for (const key of latest.keys()) if (!titled.has(key)) latest.delete(key);
-      for (const key of activityRead)
-        if (!titled.has(key)) activityRead.delete(key);
-      setActivity(new Map(latest));
-      setPartial((was) => found.partial || (!first && was));
-      setError(undefined);
-      setTitles((current) => [
-        ...(first
-          ? []
-          : (current ?? []).filter((t) => !channels.includes(t.channel))),
-        ...found.titles,
-      ]);
-    };
-    const run = (channels: readonly string[], first = false) => {
-      reading = true;
-      load(channels, first)
-        .catch((cause) => {
-          if (!signal.aborted)
-            setError(cause instanceof Error ? cause.message : String(cause));
-        })
-        .finally(() => {
-          reading = false;
-          // Channels that changed during this read get one follow-up read.
-          if (!signal.aborted && stale.size) flush();
-        });
-    };
-    const flush = () => {
-      clearTimeout(timer);
-      timer = undefined;
-      if (reading) return;
-      const channels = [...stale];
-      stale.clear();
-      run(channels);
-    };
-    const stopTitles = session.artifacts.follow(ids, (events) => {
-      void staleChannels(events, joined).then((changed) => {
-        if (signal.aborted || !changed.size) return;
-        for (const channel of changed) stale.add(channel);
-        if (reading) return;
-        clearTimeout(timer);
-        timer = setTimeout(flush, TITLE_DEBOUNCE_MS);
-      });
-    });
-    const stopReplies = session.subscribeLive(({ events }) => {
-      // Copies only when a shown row's time actually advances.
-      if (
-        noteReplies(
-          events,
-          joined,
-          titled,
-          latest,
-          reading ? buffer : undefined,
-        )
-      )
-        setActivity(new Map(latest));
-    });
-    run(ids, true);
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-      stopTitles();
-      stopReplies();
-    };
-  }, [read, session, channelKey, listReady, listError, generation]);
+    Promise.all(
+      (["pins", "done"] as const).map(async (kind) =>
+        parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+      ),
+    ).then(
+      ([pins, done]) => {
+        if (pins && done) setMarks({ pins, done });
+      },
+      (cause) => {
+        if (!signal.aborted)
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+    return () => controller.abort();
+  }, [readMarks, marksGeneration]);
+  // Each change reads the latest record, sets one root and writes it back;
+  // an unreadable record aborts before anything is written.
+  const mark = useCallback(
+    async (kind: MarkKind, root: string, on: boolean) => {
+      if (!writeMarks) return;
+      setMarking(root);
+      setSaveError(undefined);
+      try {
+        const saved = parseMarks(
+          kind,
+          await writeMarks(
+            MARK_COORDINATE[kind],
+            (current) =>
+              encodeMarks(
+                kind,
+                setMark(parseMarks(kind, current), root, on, Date.now()),
+              ),
+            AbortSignal.timeout(20_000),
+          ),
+        );
+        setMarks((current) => current && { ...current, [kind]: saved });
+        if (!!saved.get(root)?.on !== on)
+          throw new Error(
+            "That changed on another device. Refresh and try again.",
+          );
+      } catch (cause) {
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setMarking(undefined);
+      }
+    },
+    [writeMarks],
+  );
+
+  const refresh = () => {
+    setSaveError(undefined);
+    threadActivityStore(session).refresh();
+    setMarksGeneration((g) => g + 1);
+  };
 
   const rows = useMemo(
     () =>
@@ -280,7 +265,7 @@ export function ThreadsView({
           ...t,
           activeAt: Math.max(
             t.updatedAt,
-            activity.get(activityKey(t.channel, t.root)) ?? 0,
+            activity.get(activityKey(t.channel, t.root))?.at ?? 0,
           ),
         }),
       ),
@@ -292,7 +277,7 @@ export function ThreadsView({
       setEditing(undefined);
       if (!read || !writer) return;
       setSaving(row.root);
-      setError(undefined);
+      setSaveError(undefined);
       try {
         const desired = draft === undefined ? undefined : normalizeTitle(draft);
         if (desired === row.title) return;
@@ -304,23 +289,26 @@ export function ThreadsView({
           AbortSignal.timeout(20_000),
         );
         // A title change is activity: updatedAt moves the row up.
-        const now = Math.floor(Date.now() / 1000);
-        setTitles((current) =>
-          current?.flatMap((t) =>
-            t.root !== row.root
-              ? [t]
-              : desired && revision
-                ? [{ ...t, title: desired, revision, updatedAt: now }]
-                : [],
-          ),
+        store.apply(
+          row.channel,
+          row.root,
+          desired && revision
+            ? {
+                title: desired,
+                channel: row.channel,
+                root: row.root,
+                revision,
+                updatedAt: Math.floor(Date.now() / 1000),
+              }
+            : undefined,
         );
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setSaving(undefined);
       }
     },
-    [read, writer],
+    [read, writer, store],
   );
 
   const sorted = (rows ?? [])
@@ -330,12 +318,196 @@ export function ThreadsView({
     .map((id) => ({ value: id, label: names.get(id) ?? "Conversation" }))
     .sort((a, b) => a.label.localeCompare(b.label));
 
+  // The replies in a row's newest second count only when that second is a
+  // reply's, not its title's.
+  const signals = useThreadSignals(
+    session,
+    useMemo(() => [...new Set(titles?.map((t) => t.channel))], [titles]),
+  );
+  const unreadOf = (row: Row) =>
+    signals.unread.get(activityKey(row.channel, row.root)) ?? 0;
+  // One tick for the page, only while a working row shows a time.
+  const timed = [...signals.working.values()].some(
+    (work) => work.startedAt !== undefined,
+  );
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!timed) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [timed]);
+  const markRead = async (row: Row) => {
+    setSaveError(undefined);
+    try {
+      let prepared: () => Promise<unknown>;
+      try {
+        prepared = session.unread.prepareThreadRead(row.channel, row.root);
+      } catch {
+        // Unread state has only the roots this session has seen. A verified
+        // read of the root lets it prepare the read; a second failure is real.
+        await session.read(
+          [{ ids: [row.root], "#h": [row.channel], limit: 1 }],
+          {
+            signal: AbortSignal.timeout(20_000),
+          },
+        );
+        prepared = session.unread.prepareThreadRead(row.channel, row.root);
+      }
+      await prepared();
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  // Unread replies also reopen a done thread, as in Buzz 0.x: a view rule
+  // only, the saved mark is untouched.
+  const done = (row: Row) => {
+    const frontier = activity.get(activityKey(row.channel, row.root));
+    return (
+      !unreadOf(row) &&
+      isDone(
+        marks?.done.get(row.root),
+        row.activeAt,
+        frontier?.at === row.activeAt ? frontier.ids : [],
+      )
+    );
+  };
+  const renderRow = (row: Row) => {
+    const isPinned = !!marks?.pins.get(row.root)?.on;
+    const isDoneRow = done(row);
+    const unread = unreadOf(row);
+    const work = signals.working.get(activityKey(row.channel, row.root));
+    return (
+      <li key={row.root} className={styles.row}>
+        {editing === row.root ? (
+          <TitleField
+            title={row.title}
+            onDone={(draft) =>
+              draft === undefined
+                ? setEditing(undefined)
+                : void save(row, draft)
+            }
+          />
+        ) : (
+          <NavigationCard>
+            <NavigationItem
+              multiline
+              aria-busy={saving === row.root || undefined}
+              label={
+                <span className={styles.label}>
+                  <span className={`text-body ${unread ? styles.unread : ""}`}>
+                    {row.title}
+                  </span>
+                  <span className="text-caption text-subtle">
+                    {names.get(row.channel) ?? "Conversation"} ·{" "}
+                    {relativeTimestamp(row.activeAt)}
+                  </span>
+                </span>
+              }
+              trailing={
+                (unread > 0 || work) && (
+                  <span className={styles.signals}>
+                    {work && (
+                      <span
+                        className={`text-caption ${styles.working}`}
+                        role="img"
+                        aria-label={`${work.agents.length === 1 ? "An agent is" : `${work.agents.length} agents are`} working${work.startedAt === undefined ? "" : ` for ${workingDuration(work.startedAt, now)}`}`}
+                      >
+                        <TypingDots size="small" />
+                        {work.startedAt !== undefined &&
+                          workingDuration(work.startedAt, now)}
+                      </span>
+                    )}
+                    <CountBadge
+                      count={unread}
+                      label={`${unread} unread ${unread === 1 ? "reply" : "replies"}`}
+                    />
+                  </span>
+                )
+              }
+              onClick={() =>
+                void navigator.open({
+                  version: 1,
+                  kind: "conversation",
+                  scope,
+                  channelId: row.channel,
+                  messageId: row.root,
+                  threadRootId: row.root,
+                })
+              }
+            />
+            {(writer || marks || unread > 0) && (
+              <span className={styles.actions}>
+                {marks && (
+                  <>
+                    <IconButton
+                      variant="bare"
+                      icon={
+                        isPinned ? (
+                          <PinFilledIcon size={16} />
+                        ) : (
+                          <PinIcon size={16} />
+                        )
+                      }
+                      aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
+                      title={isPinned ? "Unpin" : "Pin"}
+                      disabled={!!marking}
+                      onClick={() => void mark("pins", row.root, !isPinned)}
+                    />
+                    <IconButton
+                      variant="bare"
+                      icon={
+                        isDoneRow ? (
+                          <CheckCircleFilledIcon size={16} />
+                        ) : (
+                          <CheckCircleIcon size={16} />
+                        )
+                      }
+                      aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
+                      title={isDoneRow ? "Reopen" : "Mark done"}
+                      disabled={!!marking}
+                      onClick={() => void mark("done", row.root, !isDoneRow)}
+                    />
+                  </>
+                )}
+                {unread > 0 && (
+                  <IconButton
+                    variant="bare"
+                    icon={<ChecksIcon size={16} />}
+                    aria-label={`Mark ${row.title} read`}
+                    title="Mark read"
+                    onClick={() => void markRead(row)}
+                  />
+                )}
+                {writer && (
+                  <IconButton
+                    variant="bare"
+                    icon={<PencilSimpleIcon size={16} />}
+                    aria-label={`Rename ${row.title}`}
+                    title="Rename"
+                    disabled={!!saving}
+                    onClick={() => setEditing(row.root)}
+                  />
+                )}
+              </span>
+            )}
+          </NavigationCard>
+        )}
+      </li>
+    );
+  };
+  const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
+  const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
+  // Pinned wins over done for placement: a pinned done thread stays pinned.
+  const finished = unpinned.filter((r) => done(r));
+  const active = unpinned.filter((r) => !finished.includes(r));
+
   return (
     <div data-buzz-ui="" className={styles.page}>
-      <Header onRefresh={() => setGeneration((g) => g + 1)} />
+      <Header onRefresh={refresh} />
       {read ? (
         <>
-          <div className={styles.toolbar}>
+          <div ref={toolbar} className={styles.toolbar}>
             <Select
               label="Channel"
               variant="compact"
@@ -352,6 +524,22 @@ export function ThreadsView({
                 },
               ]}
             />
+            {filter !== ALL && (
+              <IconButton
+                size="sm"
+                variant="ghost"
+                icon={<XIcon size="1rem" aria-hidden="true" />}
+                aria-label="Show all channels"
+                title="Show all channels"
+                hint="familiar"
+                onClick={() => {
+                  setFilter(ALL);
+                  toolbar.current
+                    ?.querySelector<HTMLElement>('[role="combobox"]')
+                    ?.focus();
+                }}
+              />
+            )}
           </div>
           {error && (
             <p role="alert" className={`text-body-sm ${styles.notice}`}>
@@ -377,70 +565,40 @@ export function ThreadsView({
                   }
                 />
               ) : (
-                <ul className={styles.list} aria-label="Named threads">
-                  {sorted.map((row) => (
-                    <li key={row.root} className={styles.row}>
-                      {editing === row.root ? (
-                        <TitleField
-                          title={row.title}
-                          onDone={(draft) =>
-                            draft === undefined
-                              ? setEditing(undefined)
-                              : void save(row, draft)
-                          }
-                        />
-                      ) : (
-                        <NavigationCard>
-                          <NavigationItem
-                            multiline
-                            aria-busy={saving === row.root || undefined}
-                            label={
-                              <span className={styles.label}>
-                                <span className="text-body">{row.title}</span>
-                                <span className="text-caption text-subtle">
-                                  {names.get(row.channel) ?? "Conversation"} ·{" "}
-                                  {relativeTimestamp(row.activeAt)}
-                                </span>
-                              </span>
-                            }
-                            onClick={() =>
-                              void navigator.open({
-                                version: 1,
-                                kind: "conversation",
-                                scope,
-                                channelId: row.channel,
-                                messageId: row.root,
-                                threadRootId: row.root,
-                              })
-                            }
-                          />
-                          {writer && (
-                            <span className={styles.actions}>
-                              <IconButton
-                                variant="bare"
-                                icon={<PencilSimpleIcon size={16} />}
-                                aria-label={`Rename ${row.title}`}
-                                title="Rename"
-                                disabled={!!saving}
-                                onClick={() => setEditing(row.root)}
-                              />
-                              <IconButton
-                                variant="bare"
-                                icon={<XIcon size={16} />}
-                                aria-label={`Clear title ${row.title}`}
-                                title="Clear title"
-                                disabled={!!saving}
-                                onClick={() => void save(row, undefined)}
-                              />
-                            </span>
-                          )}
-                        </NavigationCard>
+                <>
+                  {pinned.length > 0 && (
+                    <ul className={styles.list} aria-label="Pinned threads">
+                      {pinned.map(renderRow)}
+                    </ul>
+                  )}
+                  <ul className={styles.list} aria-label="Named threads">
+                    {active.map(renderRow)}
+                  </ul>
+                  {finished.length > 0 && (
+                    <section aria-label="Done threads">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-expanded={showDone}
+                        onClick={() => setShowDone((shown) => !shown)}
+                      >
+                        {showDone ? (
+                          <CaretDownIcon size="1rem" aria-hidden="true" />
+                        ) : (
+                          <CaretRightIcon size="1rem" aria-hidden="true" />
+                        )}
+                        Done ({finished.length})
+                      </Button>
+                      {showDone && (
+                        <ul className={styles.list} aria-label="Done threads">
+                          {finished.map(renderRow)}
+                        </ul>
                       )}
-                    </li>
-                  ))}
-                </ul>
+                    </section>
+                  )}
+                </>
               )}
-              {partial && (
+              {shared.partial && (
                 <p className={`text-caption text-subtle ${styles.notice}`}>
                   Showing the most recently titled threads.
                 </p>
