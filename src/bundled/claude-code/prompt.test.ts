@@ -555,3 +555,49 @@ it("tells a turn a mention starts what it owes the mention, and a wake's turn no
   expect(system).not.toContain("MUST publish");
   expect(system).not.toContain("belongs to a different session of you");
 });
+
+it("asks only the first agent a person names in a new top-level message to title it", () => {
+  const ask = "call `thread_title` with `if_unset: true`";
+  const turn = (
+    tags: string[][],
+    extra: { thread?: { rootId: string; parentId: string } } = {},
+  ) =>
+    turnPrompt({
+      agent: `${agent}@relay.example.org`,
+      event: event("1", "@Claude plan the launch", {
+        tags: [["h", "chan"], ...tags],
+      }),
+      channel: { id: "chan", name: "general" },
+      scope: "thread",
+      context: [],
+      total: 1,
+      ...extra,
+    });
+  expect(turn([["p", agent]])).toContain(ask);
+  // Another agent was named first.
+  expect(
+    turn([
+      ["p", bob],
+      ["p", agent],
+    ]),
+  ).not.toContain(ask);
+  // An agent's own message carries its owner's attestation.
+  expect(
+    turn([
+      ["p", agent],
+      ["auth", alice, "", "sig"],
+    ]),
+  ).not.toContain(ask);
+  // A reply in a thread.
+  expect(
+    turn(
+      [
+        ["p", agent],
+        ["e", "d".repeat(64), "", "reply"],
+      ],
+      {
+        thread: { rootId: "d".repeat(64), parentId: "d".repeat(64) },
+      },
+    ),
+  ).not.toContain(ask);
+});

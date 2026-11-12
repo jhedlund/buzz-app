@@ -40,6 +40,13 @@ import {
 import { imageType } from "../features/relay/attachment-limits";
 import { LIVE_CANVAS_BYTES } from "../features/channel-templates/model";
 import { threadReference } from "../features/relay/thread-reference";
+import {
+  normalizeTitle,
+  planTitle,
+  THREAD_TITLE_TYPE,
+  threadTitleId,
+  titleRevision,
+} from "../features/messages/thread-titles";
 import { parseBuzzLink } from "../features/navigation/buzz-links";
 import { soloChannelMetadata } from "../features/relay/discovery";
 import { channelLabelTags } from "../features/relay/channel-labels";
@@ -423,6 +430,15 @@ export const TOOLS: readonly Tool[] = [
       channel: str,
       create: { type: "string", description: "The new repository's name." },
       repo: { type: "string", description: "owner/name, when it has several." },
+    },
+  ),
+  tool(
+    "thread_title",
+    "A thread's shared title (default: current thread): without title, reads it; with title, sets it for everyone in the channel. if_unset leaves an existing title alone.",
+    {
+      thread: str,
+      title: str,
+      if_unset: { type: "boolean" },
     },
   ),
   tool(
@@ -1558,6 +1574,44 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
         return { data: media.data, type, text: saved };
     }
     return `${saved} Open it with your own tools.`;
+  },
+
+  async thread_title(tools, args) {
+    const { client, context } = tools;
+    const id = text(args.thread) ?? context.root;
+    if (!id) throw new Error("thread is required here.");
+    const event = await tools.event(id);
+    const channel = tag(event, "h");
+    if (!channel) throw new Error(`${event.id} is not in a channel.`);
+    // Resolve the root as the reader does, so the title lands on the thread shown.
+    const root = (threadReference(event)?.rootId ?? event.id).toLowerCase();
+    const d = await threadTitleId(root);
+    const [found] = await client.query([
+      {
+        kinds: [45010],
+        "#h": [channel],
+        "#d": [d],
+        limit: 1,
+        consistency: "strong",
+      },
+    ]);
+    const head =
+      found && tag(found, "d") === d && tag(found, "type") === THREAD_TITLE_TYPE
+        ? {
+            id: found.id,
+            deleted: tag(found, "op") === "delete",
+            title: tag(found, "title"),
+          }
+        : undefined;
+    const live = head && !head.deleted ? head.title : undefined;
+    if (args.title === undefined) return live ?? "No title.";
+    const desired = normalizeTitle(required(args, "title"));
+    if (!desired) throw new Error("title is empty.");
+    if (args.if_unset === true && live) return `Already titled: ${live}`;
+    const plan = planTitle(head, desired);
+    if (plan.op === "unchanged") return "unchanged";
+    await client.publish(await titleRevision(channel, root, plan, desired));
+    return `titled ${root}: ${desired}`;
   },
 
   async tabs(tools, args) {

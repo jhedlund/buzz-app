@@ -4,6 +4,7 @@ import {
   BUZZ_PROMPT,
   TOP_LEVEL_PROMPT,
   CHANNEL_LEVEL_PROMPT,
+  threadTitlePrompt,
 } from "../../buzz-mcp/prompt";
 import type { EventData } from "../../features/relay/events";
 import { messageAuthor } from "../../features/relay/fold";
@@ -199,7 +200,18 @@ export function turnPrompt(input: TurnInput) {
   parts.push(
     section(
       "context",
-      [...lines, `Agent: ${input.agent}`, hint, reply].join("\n"),
+      [
+        ...lines,
+        `Agent: ${input.agent}`,
+        hint,
+        reply,
+        // A new top-level message: the first agent it names titles it.
+        ...(!input.topLevel && !thread && !input.wake
+          ? [threadTitlePrompt(event, input.agent) ?? ""]
+          : []),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     ),
   );
   if (input.project) parts.push(input.project);
