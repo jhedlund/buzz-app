@@ -65,10 +65,13 @@ async function fixture({
   empty = false,
   writable = true,
   hold,
+  holdActivity,
 }: {
   empty?: boolean;
   writable?: boolean;
   hold?: Promise<void>;
+  /** Holds every reply read open until it resolves. */
+  holdActivity?: Promise<void>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   // The relay's current heads and stored replies; a test changes them as the
@@ -102,13 +105,14 @@ async function fixture({
     );
   });
   // A newer reply moves Launch plan to the top.
-  const read = vi.fn(async (filters: readonly ReadFilter[]) =>
-    relay.replies.filter((r) =>
+  const read = vi.fn(async (filters: readonly ReadFilter[]) => {
+    await holdActivity;
+    return relay.replies.filter((r) =>
       r.tags.some(
         ([k, v]) => k === "e" && filters[0]?.["#e"]?.includes(v ?? ""),
       ),
-    ),
-  );
+    );
+  });
   const list = {
     status: "ready",
     channels: [
@@ -154,14 +158,16 @@ async function fixture({
       : undefined,
   } as unknown as RelaySession;
   const open = vi.fn(async () => ({ status: "opened" }));
-  render(
-    <ThreadsView
-      session={session}
-      scope={scope}
-      navigator={{ open } as unknown as Navigation}
-    />,
-  );
-  return { publish, open, snapshotRead, read, live, now, relay };
+  const mount = () =>
+    render(
+      <ThreadsView
+        session={session}
+        scope={scope}
+        navigator={{ open } as unknown as Navigation}
+      />,
+    );
+  const view = mount();
+  return { publish, open, snapshotRead, read, live, now, relay, view, mount };
 }
 const rows = async () =>
   within(await screen.findByRole("list", { name: "Named threads" }))
@@ -209,6 +215,66 @@ it("filters by channel", async () => {
   await waitFor(async () => expect(await rows()).toEqual(["Bug triagebeta"]));
 });
 
+it("offers a clear-filter button only while a channel is chosen", async () => {
+  await fixture();
+  await rows();
+  expect(
+    screen.queryByRole("button", { name: "Show all channels" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("combobox", { name: "Channel" }));
+  await userEvent.click(await screen.findByRole("option", { name: "alpha" }));
+  await waitFor(async () => expect(await rows()).toHaveLength(2));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Show all channels" }),
+  );
+  expect(await rows()).toHaveLength(3);
+  expect(screen.getByRole("combobox", { name: "Channel" })).toHaveFocus();
+  expect(
+    screen.queryByRole("button", { name: "Show all channels" }),
+  ).not.toBeInTheDocument();
+});
+
+it("draws rows by title time before any reply read returns, then reorders", async () => {
+  let release = () => {};
+  const holdActivity = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = await fixture({ holdActivity });
+  try {
+    await waitFor(() => expect(f.read).toHaveBeenCalled());
+    expect(await rows()).toEqual([
+      "Retro notesalpha",
+      "Bug triagebeta",
+      "Launch planalpha",
+    ]);
+  } finally {
+    release();
+  }
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+});
+
+it("reopens with no relay reads and keeps replies that arrived while closed", async () => {
+  const f = await fixture();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  await waitFor(() => expect(f.read).toHaveBeenCalledTimes(2));
+  const titleReads = f.snapshotRead.mock.calls.length;
+  f.view.unmount();
+  // Bug triage gets a newer reply while the page is closed.
+  act(() =>
+    f.live.events?.({
+      events: [reply("r9", BETA, "b".repeat(64), f.now)],
+    }),
+  );
+  f.mount();
+  expect(await rows()).toEqual([
+    "Bug triagebeta",
+    "Launch planalpha",
+    "Retro notesalpha",
+  ]);
+  expect(f.snapshotRead).toHaveBeenCalledTimes(titleReads);
+  expect(f.read).toHaveBeenCalledTimes(2);
+});
+
 it("renames inline with Enter and cancels with Escape", async () => {
   const f = await fixture();
   await rows();
@@ -233,12 +299,19 @@ it("renames inline with Enter and cancels with Escape", async () => {
   expect(f.publish).toHaveBeenCalledTimes(1);
 });
 
-it("clears a title with a soft delete and removes its row", async () => {
+it("clears a title saved blank with a soft delete and removes its row", async () => {
   const f = await fixture();
   await rows();
+  expect(
+    screen.queryByRole("button", { name: /^Clear title/ }),
+  ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("button", { name: "Clear title Retro notes" }),
+    screen.getByRole("button", { name: "Rename Retro notes" }),
   );
+  await userEvent.clear(
+    screen.getByRole("textbox", { name: "Title for Retro notes" }),
+  );
+  await userEvent.keyboard("{Enter}");
   await waitFor(async () =>
     expect(await rows()).toEqual(["Launch planalpha", "Bug triagebeta"]),
   );
@@ -255,7 +328,11 @@ it("reports a title someone else changed instead of overwriting it", async () =>
     await title("e9", "Theirs", "a".repeat(64), ALPHA, 1),
   ]);
   await userEvent.click(
-    screen.getByRole("button", { name: "Clear title Launch plan" }),
+    screen.getByRole("button", { name: "Rename Launch plan" }),
+  );
+  await userEvent.type(
+    screen.getByRole("textbox", { name: "Title for Launch plan" }),
+    " v2{Enter}",
   );
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Someone else changed this thread's title",

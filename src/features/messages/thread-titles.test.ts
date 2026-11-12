@@ -212,6 +212,42 @@ describe("reads", () => {
       { kinds: [9, 40002, 45003], "#e": [ROOT], "#h": [CHANNEL], limit: 500 },
     ]);
   });
+
+  it("reads at most four channels at once, and one held read blocks none of the others", async () => {
+    const channels = Array.from(
+      { length: 6 },
+      (_, i) => `${i}`.repeat(8) + "-1111-4111-8111-111111111111",
+    );
+    const titles = channels.map((channel) => ({ channel, root: ROOT }));
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inFlight = 0;
+    let most = 0;
+    const read = vi.fn(async (filters: readonly ReadFilter[]) => {
+      const channel = filters[0]?.["#h"]?.[0] ?? "";
+      inFlight++;
+      most = Math.max(most, inFlight);
+      try {
+        if (channel === channels[0]) await held;
+        await Promise.resolve();
+        return [reply(`r${channel}`, channel, ROOT, 300)];
+      } finally {
+        inFlight--;
+      }
+    });
+    const done = readActivity(
+      { read },
+      titles as ThreadTitle[],
+      new AbortController().signal,
+    );
+    // Every other channel finishes while the first is held.
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(6));
+    expect(most).toBe(4);
+    release();
+    expect((await done).size).toBe(6);
+  });
 });
 
 describe("writes", () => {

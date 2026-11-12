@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { Navigation } from "../../features/navigation/controller";
 import type { NavigationScope } from "../../features/navigation/targets";
 import { useChannelList, useRelayConnection } from "../../features/relay/react";
@@ -26,15 +26,17 @@ import {
 import { Select } from "../../shared/design-system/ui/Select";
 import { relativeTimestamp } from "../../shared/relative-timestamp";
 import {
+  threadActivityStore,
+  useThreadActivity,
+} from "../../features/messages/thread-activity-store";
+import {
   threadTitleStore,
   useThreadTitles,
 } from "../../features/messages/thread-title-store";
 import {
   activityKey,
   normalizeTitle,
-  noteReplies,
   type Row,
-  readActivity,
   writeTitle,
 } from "../../features/messages/thread-titles";
 import styles from "./Threads.module.css";
@@ -154,67 +156,21 @@ export function ThreadsView({
     () => shared.titles && [...shared.titles.values()],
     [shared.titles],
   );
-  const [activity, setActivity] = useState<ReadonlyMap<string, number>>(
-    () => new Map(),
-  );
+  // Rows draw from titles alone, by title time; reply times reorder them as
+  // they arrive and stay for the session, so a reopened page reads nothing.
+  const activity = useThreadActivity(session);
   const [saveError, setSaveError] = useState<string>();
   const [filter, setFilter] = useState(ALL);
   const [editing, setEditing] = useState<string>();
   const [saving, setSaving] = useState<string>();
-  const [generation, setGeneration] = useState(0);
   const read = session.snapshotRead;
   const writer = session.configArtifactWriter;
   const error = saveError ?? shared.error;
-
-  // Reply times of titled rows: one `#e` read per row as it appears (again
-  // after it leaves and comes back), then live replies, in any order. A reply
-  // that lands before its row is known is in that row's read.
-  const latest = useRef(new Map<string, number>());
-  const activityRead = useRef(new Set<string>());
-  const titled = useMemo(
-    () => new Set(titles?.map((t) => activityKey(t.channel, t.root))),
-    [titles],
-  );
-  useEffect(() => {
-    void generation;
-    if (!titles) return;
-    for (const key of latest.current.keys())
-      if (!titled.has(key)) latest.current.delete(key);
-    for (const key of activityRead.current)
-      if (!titled.has(key)) activityRead.current.delete(key);
-    const fresh = titles.filter(
-      (t) => !activityRead.current.has(activityKey(t.channel, t.root)),
-    );
-    setActivity(new Map(latest.current));
-    if (!fresh.length) return;
-    const controller = new AbortController();
-    readActivity(session, fresh, controller.signal)
-      .then((times) => {
-        for (const t of fresh)
-          activityRead.current.add(activityKey(t.channel, t.root));
-        for (const [key, at] of times)
-          if (titled.has(key))
-            latest.current.set(key, Math.max(at, latest.current.get(key) ?? 0));
-        setActivity(new Map(latest.current));
-      })
-      // Only an abort rejects: readActivity keeps failed batches at title time.
-      .catch(() => {});
-    return () => controller.abort();
-  }, [session, titles, titled, generation]);
-  useEffect(() => {
-    const channels = new Set(titles?.map((t) => t.channel));
-    return session.subscribeLive(({ events }) => {
-      // Copies only when a shown row's time actually advances.
-      if (noteReplies(events, channels, titled, latest.current))
-        setActivity(new Map(latest.current));
-    });
-  }, [session, titles, titled]);
+  const toolbar = useRef<HTMLDivElement>(null);
 
   const refresh = () => {
-    activityRead.current.clear();
     setSaveError(undefined);
-    store.refresh();
-    setGeneration((g) => g + 1);
+    threadActivityStore(session).refresh();
   };
 
   const rows = useMemo(
@@ -282,7 +238,7 @@ export function ThreadsView({
       <Header onRefresh={refresh} />
       {read ? (
         <>
-          <div className={styles.toolbar}>
+          <div ref={toolbar} className={styles.toolbar}>
             <Select
               label="Channel"
               variant="compact"
@@ -299,6 +255,22 @@ export function ThreadsView({
                 },
               ]}
             />
+            {filter !== ALL && (
+              <IconButton
+                size="sm"
+                variant="ghost"
+                icon={<XIcon size="1rem" aria-hidden="true" />}
+                aria-label="Show all channels"
+                title="Show all channels"
+                hint="familiar"
+                onClick={() => {
+                  setFilter(ALL);
+                  toolbar.current
+                    ?.querySelector<HTMLElement>('[role="combobox"]')
+                    ?.focus();
+                }}
+              />
+            )}
           </div>
           {error && (
             <p role="alert" className={`text-body-sm ${styles.notice}`}>
@@ -370,14 +342,6 @@ export function ThreadsView({
                                 title="Rename"
                                 disabled={!!saving}
                                 onClick={() => setEditing(row.root)}
-                              />
-                              <IconButton
-                                variant="bare"
-                                icon={<XIcon size={16} />}
-                                aria-label={`Clear title ${row.title}`}
-                                title="Clear title"
-                                disabled={!!saving}
-                                onClick={() => void save(row, undefined)}
                               />
                             </span>
                           )}
