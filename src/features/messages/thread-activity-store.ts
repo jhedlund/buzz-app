@@ -3,6 +3,11 @@
 // (again after it leaves and comes back); live replies keep it current from
 // then on, including while the page is closed. Once started it stays on for
 // the session, holding the title store with it.
+//
+// Relay reads per session: sum over titled channels of ceil(roots/100) `#e`
+// reads when the page first opens, four at a time; one per newly titled
+// thread after that; none on reopen or reconnect (replay carries what was
+// missed). Refresh repeats the first-open reads.
 import { useSyncExternalStore } from "react";
 import type { RelaySession } from "../relay/session";
 import { threadTitleStore } from "./thread-title-store";
@@ -82,14 +87,20 @@ function createStore(session: Session): ThreadActivityStore {
   const start = () => {
     started = true;
     titles.subscribe(onTitles);
-    session.subscribeLive(({ events }) => {
-      const current = titles.snapshot().titles;
-      if (!current?.size) return;
-      const keys = new Set(current.keys());
-      const channels = new Set([...current.values()].map((t) => t.channel));
-      // Copies only when a titled row's time actually advances.
-      if (noteReplies(events, channels, keys, latest)) publish();
-    });
+    // Replay too: a reply that arrived while disconnected comes back in the
+    // reconnect replay, and no new #e read would find it for a row already read.
+    session.subscribeLive(
+      ({ events }) => {
+        const current = titles.snapshot().titles;
+        if (!current?.size) return;
+        const keys = new Set(current.keys());
+        const channels = new Set([...current.values()].map((t) => t.channel));
+        // Copies only when a titled row's time actually advances; a replayed
+        // or duplicate reply changes nothing.
+        if (noteReplies(events, channels, keys, latest)) publish();
+      },
+      { replay: true },
+    );
     onTitles();
   };
   return {
