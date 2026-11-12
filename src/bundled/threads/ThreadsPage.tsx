@@ -25,22 +25,21 @@ import {
 } from "../../shared/design-system/ui/PanelHeader";
 import { Select } from "../../shared/design-system/ui/Select";
 import { relativeTimestamp } from "../../shared/relative-timestamp";
-import styles from "./Threads.module.css";
+import {
+  threadTitleStore,
+  useThreadTitles,
+} from "../../features/messages/thread-title-store";
 import {
   activityKey,
   normalizeTitle,
+  noteReplies,
   type Row,
   readActivity,
-  readTitles,
-  staleChannels,
-  type ThreadTitle,
-  noteReplies,
   writeTitle,
-} from "./thread-titles";
+} from "../../features/messages/thread-titles";
+import styles from "./Threads.module.css";
 
 const ALL = "";
-/** A burst of title changes waits this long, then reads its channels once. */
-const TITLE_DEBOUNCE_MS = 300;
 
 export function ThreadsPage({
   relay,
@@ -149,129 +148,74 @@ export function ThreadsView({
     () => new Map(list.channels.map((c) => [c.id, c.name || "Conversation"])),
     [list.channels],
   );
-  const channelKey = [...names.keys()].sort().join(",");
-  const [titles, setTitles] = useState<readonly ThreadTitle[]>();
+  const store = threadTitleStore(session);
+  const shared = useThreadTitles(session);
+  const titles = useMemo(
+    () => shared.titles && [...shared.titles.values()],
+    [shared.titles],
+  );
   const [activity, setActivity] = useState<ReadonlyMap<string, number>>(
     () => new Map(),
   );
-  const [partial, setPartial] = useState(false);
-  const [error, setError] = useState<string>();
+  const [saveError, setSaveError] = useState<string>();
   const [filter, setFilter] = useState(ALL);
   const [editing, setEditing] = useState<string>();
   const [saving, setSaving] = useState<string>();
   const [generation, setGeneration] = useState(0);
   const read = session.snapshotRead;
   const writer = session.configArtifactWriter;
+  const error = saveError ?? shared.error;
 
-  // Settled once, so a background list refresh does not re-read titles.
-  const listReady = list.status === "ready" || list.channels.length > 0;
-  const listError = list.status === "error" ? (list.error ?? "") : undefined;
-  // The relay's current read is the only authority on titles: a live title
-  // revision only marks its channel stale, and a debounced read of the stale
-  // channels replaces their rows. Replies keep the newest time per titled
-  // root, in any order; other roots only in a capped buffer while a read is
-  // in flight, merged once the rows are known. The live routes already carry the joined channels, titles
-  // included, so following them adds no subscriptions.
+  // Reply times of titled rows: one `#e` read per row as it appears (again
+  // after it leaves and comes back), then live replies, in any order. A reply
+  // that lands before its row is known is in that row's read.
+  const latest = useRef(new Map<string, number>());
+  const activityRead = useRef(new Set<string>());
+  const titled = useMemo(
+    () => new Set(titles?.map((t) => activityKey(t.channel, t.root))),
+    [titles],
+  );
   useEffect(() => {
     void generation;
-    if (listError !== undefined)
-      return setError(listError || "Couldn't load your channels.");
-    if (!read || !listReady) return;
-    if (!channelKey) return setTitles([]);
-    const ids = channelKey.split(",");
-    const joined = new Set(ids);
+    if (!titles) return;
+    for (const key of latest.current.keys())
+      if (!titled.has(key)) latest.current.delete(key);
+    for (const key of activityRead.current)
+      if (!titled.has(key)) activityRead.current.delete(key);
+    const fresh = titles.filter(
+      (t) => !activityRead.current.has(activityKey(t.channel, t.root)),
+    );
+    setActivity(new Map(latest.current));
+    if (!fresh.length) return;
     const controller = new AbortController();
-    const { signal } = controller;
-    const stale = new Set<string>();
-    const activityRead = new Set<string>();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let reading = false;
-    /** Reply times of titled rows only, and replies held during a read. */
-    const latest = new Map<string, number>();
-    const buffer = new Map<string, number>();
-    let shown: readonly ThreadTitle[] = [];
-    let titled = new Set<string>();
-    const load = async (channels: readonly string[], first: boolean) => {
-      const found = await readTitles(read, channels, signal);
-      const fresh = found.titles.filter(
-        (t) => !activityRead.has(activityKey(t.channel, t.root)),
-      );
-      const times = await readActivity(session, fresh, signal);
-      for (const t of fresh) activityRead.add(activityKey(t.channel, t.root));
-      shown = [
-        ...(first ? [] : shown.filter((t) => !channels.includes(t.channel))),
-        ...found.titles,
-      ];
-      titled = new Set(shown.map((t) => activityKey(t.channel, t.root)));
-      for (const [key, at] of [...times, ...buffer])
-        if (titled.has(key))
-          latest.set(key, Math.max(at, latest.get(key) ?? 0));
-      buffer.clear();
-      // A row that leaves and comes back reads its replies again.
-      for (const key of latest.keys()) if (!titled.has(key)) latest.delete(key);
-      for (const key of activityRead)
-        if (!titled.has(key)) activityRead.delete(key);
-      setActivity(new Map(latest));
-      setPartial((was) => found.partial || (!first && was));
-      setError(undefined);
-      setTitles((current) => [
-        ...(first
-          ? []
-          : (current ?? []).filter((t) => !channels.includes(t.channel))),
-        ...found.titles,
-      ]);
-    };
-    const run = (channels: readonly string[], first = false) => {
-      reading = true;
-      load(channels, first)
-        .catch((cause) => {
-          if (!signal.aborted)
-            setError(cause instanceof Error ? cause.message : String(cause));
-        })
-        .finally(() => {
-          reading = false;
-          // Channels that changed during this read get one follow-up read.
-          if (!signal.aborted && stale.size) flush();
-        });
-    };
-    const flush = () => {
-      clearTimeout(timer);
-      timer = undefined;
-      if (reading) return;
-      const channels = [...stale];
-      stale.clear();
-      run(channels);
-    };
-    const stopTitles = session.artifacts.follow(ids, (events) => {
-      void staleChannels(events, joined).then((changed) => {
-        if (signal.aborted || !changed.size) return;
-        for (const channel of changed) stale.add(channel);
-        if (reading) return;
-        clearTimeout(timer);
-        timer = setTimeout(flush, TITLE_DEBOUNCE_MS);
-      });
-    });
-    const stopReplies = session.subscribeLive(({ events }) => {
+    readActivity(session, fresh, controller.signal)
+      .then((times) => {
+        for (const t of fresh)
+          activityRead.current.add(activityKey(t.channel, t.root));
+        for (const [key, at] of times)
+          if (titled.has(key))
+            latest.current.set(key, Math.max(at, latest.current.get(key) ?? 0));
+        setActivity(new Map(latest.current));
+      })
+      // Only an abort rejects: readActivity keeps failed batches at title time.
+      .catch(() => {});
+    return () => controller.abort();
+  }, [session, titles, titled, generation]);
+  useEffect(() => {
+    const channels = new Set(titles?.map((t) => t.channel));
+    return session.subscribeLive(({ events }) => {
       // Copies only when a shown row's time actually advances.
-      if (
-        noteReplies(
-          events,
-          joined,
-          titled,
-          latest,
-          reading ? buffer : undefined,
-        )
-      )
-        setActivity(new Map(latest));
+      if (noteReplies(events, channels, titled, latest.current))
+        setActivity(new Map(latest.current));
     });
-    run(ids, true);
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-      stopTitles();
-      stopReplies();
-    };
-  }, [read, session, channelKey, listReady, listError, generation]);
+  }, [session, titles, titled]);
+
+  const refresh = () => {
+    activityRead.current.clear();
+    setSaveError(undefined);
+    store.refresh();
+    setGeneration((g) => g + 1);
+  };
 
   const rows = useMemo(
     () =>
@@ -292,7 +236,7 @@ export function ThreadsView({
       setEditing(undefined);
       if (!read || !writer) return;
       setSaving(row.root);
-      setError(undefined);
+      setSaveError(undefined);
       try {
         const desired = draft === undefined ? undefined : normalizeTitle(draft);
         if (desired === row.title) return;
@@ -304,23 +248,26 @@ export function ThreadsView({
           AbortSignal.timeout(20_000),
         );
         // A title change is activity: updatedAt moves the row up.
-        const now = Math.floor(Date.now() / 1000);
-        setTitles((current) =>
-          current?.flatMap((t) =>
-            t.root !== row.root
-              ? [t]
-              : desired && revision
-                ? [{ ...t, title: desired, revision, updatedAt: now }]
-                : [],
-          ),
+        store.apply(
+          row.channel,
+          row.root,
+          desired && revision
+            ? {
+                title: desired,
+                channel: row.channel,
+                root: row.root,
+                revision,
+                updatedAt: Math.floor(Date.now() / 1000),
+              }
+            : undefined,
         );
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setSaveError(cause instanceof Error ? cause.message : String(cause));
       } finally {
         setSaving(undefined);
       }
     },
-    [read, writer],
+    [read, writer, store],
   );
 
   const sorted = (rows ?? [])
@@ -332,7 +279,7 @@ export function ThreadsView({
 
   return (
     <div data-buzz-ui="" className={styles.page}>
-      <Header onRefresh={() => setGeneration((g) => g + 1)} />
+      <Header onRefresh={refresh} />
       {read ? (
         <>
           <div className={styles.toolbar}>
@@ -440,7 +387,7 @@ export function ThreadsView({
                   ))}
                 </ul>
               )}
-              {partial && (
+              {shared.partial && (
                 <p className={`text-caption text-subtle ${styles.notice}`}>
                   Showing the most recently titled threads.
                 </p>
