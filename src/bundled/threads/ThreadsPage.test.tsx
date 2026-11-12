@@ -958,7 +958,7 @@ it("orders row actions Rename, Mark read, Done, Pin and keeps a set pin or done 
   expect(reveal("Rename Launch plan")).toBe(true);
 });
 
-it("keeps a later pin when an earlier one fails while it is still queued", async () => {
+it("keeps a later pin when an earlier one fails, however slow its recovery read", async () => {
   const f = await fixture({ marks: {} });
   await screen.findByRole("button", { name: "Pin Launch plan" });
   const held = () => {
@@ -968,18 +968,12 @@ it("keeps a later pin when an earlier one fails while it is still queued", async
     });
     return { gate, release };
   };
-  const first = held();
-  const second = held();
-  const write = f.writeThreadMarks.getMockImplementation();
-  f.writeThreadMarks
-    .mockImplementationOnce(async () => {
-      await first.gate;
-      throw new Error("Relay offline");
-    })
-    .mockImplementationOnce(async (...args) => {
-      await second.gate;
-      return write?.(...args);
-    });
+  const failing = held();
+  const recovery = held();
+  f.writeThreadMarks.mockImplementationOnce(async () => {
+    await failing.gate;
+    throw new Error("Relay offline");
+  });
   await userEvent.click(
     screen.getByRole("button", { name: "Pin Launch plan" }),
   );
@@ -988,16 +982,20 @@ it("keeps a later pin when an earlier one fails while it is still queued", async
     "Launch planalpha",
     "Bug triagebeta",
   ]);
-  // The first fails, and its recovery read (no pins saved yet) lands while
-  // the second is still being saved.
-  const reads = f.readThreadMarks.mock.calls.length;
-  first.release();
-  await waitFor(() =>
-    expect(f.readThreadMarks.mock.calls.length).toBeGreaterThan(reads + 1),
-  );
-  await waitFor(() => expect(f.writeThreadMarks).toHaveBeenCalledTimes(2));
+  // The recovery read, taken before the second save, answers no pins and
+  // is held; the second save waits for it rather than racing it.
+  const read = f.readThreadMarks.getMockImplementation();
+  f.readThreadMarks.mockImplementation(async (...args) => {
+    const answer = await read?.(...args);
+    await recovery.gate;
+    return answer;
+  });
+  failing.release();
+  await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+  expect(f.writeThreadMarks).toHaveBeenCalledTimes(1);
   expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
-  second.release();
+  recovery.release();
+  await waitFor(() => expect(f.writeThreadMarks).toHaveBeenCalledTimes(2));
   await waitFor(async () =>
     expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]),
   );
