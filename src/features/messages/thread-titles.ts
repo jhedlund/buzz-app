@@ -213,9 +213,12 @@ export async function readTitles(
   return { titles, partial };
 }
 
+/** Activity reads in flight at once. */
+const ACTIVITY_CONCURRENCY = 4;
+
 /** Newest reply per channel and root (see activityKey), read by `#e` on the
- * roots in each channel. Activity only refines the order: a failed read
- * leaves those roots at their title time. */
+ * roots in each channel, ACTIVITY_CONCURRENCY reads at a time. Activity only
+ * refines the order: a failed read leaves those roots at their title time. */
 export async function readActivity(
   session: Pick<RelaySession, "read">,
   titles: readonly ThreadTitle[],
@@ -225,25 +228,32 @@ export async function readActivity(
   const roots = new Map<string, string[]>();
   for (const { channel, root } of titles)
     roots.set(channel, [...(roots.get(channel) ?? []), root]);
+  const batches: [string, string[]][] = [];
   for (const [channel, all] of roots)
-    for (let at = 0; at < all.length; at += BATCH) {
-      const batch = all.slice(at, at + BATCH);
-      try {
-        const replies = await session.read(
-          [{ kinds: REPLY_KINDS, "#e": batch, "#h": [channel], limit: PAGE }],
-          { signal },
-        );
-        noteReplies(
-          replies,
-          new Set([channel]),
-          new Set(batch.map((root) => activityKey(channel, root))),
-          latest,
-        );
-      } catch (error) {
-        signal.throwIfAborted();
-        console.warn("Thread activity read failed", error);
-      }
+    for (let at = 0; at < all.length; at += BATCH)
+      batches.push([channel, all.slice(at, at + BATCH)]);
+  const next = async (): Promise<void> => {
+    const item = batches.shift();
+    if (!item) return;
+    const [channel, batch] = item;
+    try {
+      const replies = await session.read(
+        [{ kinds: REPLY_KINDS, "#e": batch, "#h": [channel], limit: PAGE }],
+        { signal },
+      );
+      noteReplies(
+        replies,
+        new Set([channel]),
+        new Set(batch.map((root) => activityKey(channel, root))),
+        latest,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      console.warn("Thread activity read failed", error);
     }
+    return next();
+  };
+  await Promise.all(Array.from({ length: ACTIVITY_CONCURRENCY }, next));
   return latest;
 }
 
