@@ -205,23 +205,21 @@ export function ThreadsView({
     Readonly<{ pins: Marks; done: Marks }> | undefined
   >();
   const [pending, setPending] = useState<readonly MarkChange[]>([]);
-  const marks = useMemo(
-    () =>
-      saved &&
-      pending.reduce(
-        (shown, change) => ({
-          ...shown,
-          [change.kind]: setMark(
-            shown[change.kind],
-            change.root,
-            change.on,
-            change.at,
-          ),
-        }),
-        saved,
-      ),
-    [saved, pending],
-  );
+  const marks = useMemo(() => {
+    if (!saved) return undefined;
+    let shown = saved;
+    for (const change of pending)
+      shown = {
+        ...shown,
+        [change.kind]: setMark(
+          shown[change.kind],
+          change.root,
+          change.on,
+          change.at,
+        ),
+      };
+    return shown;
+  }, [saved, pending]);
   const [showDone, setShowDone] = useState(false);
   const [marksGeneration, setMarksGeneration] = useState(0);
   // Reads and writes of the marks run one at a time, so a read never lands
