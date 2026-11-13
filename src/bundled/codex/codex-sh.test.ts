@@ -27,9 +27,24 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
+import { scriptOptions } from "../git-bash";
 import script from "./codex.sh?raw";
 
 const execFileAsync = promisify(execFile);
+/** A folder as Git for Windows' bash names it: `/c/Users/me` for
+ * `C:\Users\me`. codex.sh prints folders that way, and passes them that way
+ * to the script standing in for codex.exe. Unchanged elsewhere. */
+const shellPath = (path: string) =>
+  process.platform === "win32"
+    ? path
+        .replace(
+          /^([A-Za-z]):/,
+          (_, drive: string) => `/${drive.toLowerCase()}`,
+        )
+        .replaceAll("\\", "/")
+    : path;
+/** The release binary codex.sh runs: `bin/codex.exe` under Git for Windows. */
+const codex = process.platform === "win32" ? "bin/codex.exe" : "bin/codex";
 const homes: string[] = [];
 const runs: PromiseWithChild<unknown>[] = [];
 afterEach(async () => {
@@ -68,6 +83,23 @@ function run(
   return running;
 }
 
+/** Runs a codex.sh step under `bash -c` as the plugin does. codex.sh is over
+ * 8 KB, which Git for Windows' bash cuts any one argument at, so on Windows
+ * the script goes in the environment, as `scriptOptions` sends it there. */
+function codexSh(args: readonly string[], options: ExecFileOptions) {
+  const step = scriptOptions(
+    script,
+    "codex.sh",
+    args,
+    { env: options.env as Record<string, string> },
+    process.platform === "win32",
+  );
+  return run("bash", ["-c", ...(step.args ?? [])], {
+    ...options,
+    env: step.env as NodeJS.ProcessEnv,
+  });
+}
+
 /** Buzz's codex folder in a new home, holding fake `releases` with `current`. */
 async function disk(releases: readonly string[], current?: string) {
   const home = await realpath(await mkdtemp(join(tmpdir(), "buzz-codex-")));
@@ -77,14 +109,14 @@ async function disk(releases: readonly string[], current?: string) {
       ? join(home, "Library/Application Support/Buzz/codex")
       : join(home, ".local/share/buzz/codex");
   for (const version of releases) {
-    const binary = join(dir, version, "bin/codex");
+    const binary = join(dir, version, codex);
     await mkdir(dirname(binary), { recursive: true });
     await writeFile(binary, `#!/bin/sh\necho "codex-cli ${version}"\n`);
     await chmod(binary, 0o755);
   }
   if (current) await writeFile(join(dir, "current"), current);
   const step = (...args: string[]) =>
-    run("bash", ["-c", script, "codex.sh", ...args], {
+    codexSh(args, {
       env: { PATH: process.env.PATH ?? "", HOME: home },
     });
   return {
@@ -218,13 +250,9 @@ it("starts the release in use when switches prune the one it read", async () => 
     if (name === "read") observed();
   });
   watcher.once("error", failed);
-  const launching = run(
-    "bash",
-    ["-c", script, "codex.sh", "run", "--version"],
-    {
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home },
-    },
-  );
+  const launching = codexSh(["run", "--version"], {
+    env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home },
+  });
   try {
     // Observe the actual read event; process startup is not the behavior under test.
     await Promise.race([
@@ -256,7 +284,7 @@ const shared = ["config.toml", "auth.json", "AGENTS.md", "rules", "skills"];
 async function echoing() {
   const f = await disk(["0.1.0", "0.2.0"], "0.1.0");
   await writeFile(
-    join(f.dir, "0.1.0/bin/codex"),
+    join(f.dir, "0.1.0", codex),
     '#!/bin/sh\nprintf "%s\\n" "$CODEX_HOME" "$@"\n',
   );
   return { ...f, own: `${f.dir}-home`, codex: join(f.home, ".codex") };
@@ -266,9 +294,9 @@ it("runs Codex in Buzz's own home, linked to the shared settings and sign-in", a
   const f = await echoing();
   const { stdout } = await f.step("run", "app-server");
   expect(stdout.trim().split("\n")).toEqual([
-    f.own,
+    shellPath(f.own),
     "-c",
-    `sqlite_home=${f.own}`,
+    `sqlite_home=${shellPath(f.own)}`,
     "app-server",
   ]);
   for (const name of shared)
@@ -282,17 +310,13 @@ it("runs Codex in Buzz's own home, linked to the shared settings and sign-in", a
 it("reuses the original shared home when launched from a Buzz Codex agent", async () => {
   const f = await echoing();
   await f.step("run");
-  const { stdout } = await run(
-    "bash",
-    ["-c", script, "codex.sh", "run", "app-server"],
-    {
-      env: { PATH: process.env.PATH ?? "", HOME: f.home, CODEX_HOME: f.own },
-    },
-  );
+  const { stdout } = await codexSh(["run", "app-server"], {
+    env: { PATH: process.env.PATH ?? "", HOME: f.home, CODEX_HOME: f.own },
+  });
   expect(stdout.trim().split("\n")).toEqual([
-    f.own,
+    shellPath(f.own),
     "-c",
-    `sqlite_home=${f.own}`,
+    `sqlite_home=${shellPath(f.own)}`,
     "app-server",
   ]);
   for (const name of shared)
@@ -304,7 +328,7 @@ it("refuses an inherited isolated home without its original config link", async 
   await mkdir(f.own, { recursive: true });
   await writeFile(join(f.own, "config.toml"), "keep me");
   await expect(
-    run("bash", ["-c", script, "codex.sh", "run"], {
+    codexSh(["run"], {
       env: { PATH: process.env.PATH ?? "", HOME: f.home, CODEX_HOME: f.own },
     }),
   ).rejects.toMatchObject({ stderr: expect.stringContaining("must differ") });
@@ -359,7 +383,7 @@ it("prints Buzz's home with its links and sign-in hand-over, as `run` does", asy
   await writeFile(join(f.codex, "auth.json"), "revoked");
   await f.step("run");
   await signIn(f.own, "signed in");
-  expect((await f.step("home")).stdout).toBe(`${f.own}\n`);
+  expect((await f.step("home")).stdout).toBe(`${shellPath(f.own)}\n`);
   for (const name of shared)
     expect(await readlink(join(f.own, name))).toBe(join(f.codex, name));
   expect(await readFile(join(f.codex, "auth.json"), "utf8")).toBe("signed in");
@@ -383,7 +407,7 @@ it("makes a review home of only the sign-in and links to its own state", async (
   await symlink(join(f.home, "elsewhere"), join(home, "installation_id"));
   await symlink(join(f.home, "elsewhere"), join(home, "workspace"));
   const { stdout } = await f.step("review");
-  expect(stdout).toBe(`${home}\n${state}\n`);
+  expect(stdout).toBe(`${shellPath(home)}\n${shellPath(state)}\n`);
   expect((await readdir(home)).sort()).toEqual(
     ["auth.json", ...written].sort(),
   );
@@ -426,7 +450,7 @@ async function signingIn(auth: object, gate = false) {
   const f = await echoing();
   await writeFile(join(f.home, "next.json"), JSON.stringify(auth, null, 2));
   await writeFile(
-    join(f.dir, "0.1.0/bin/codex"),
+    join(f.dir, "0.1.0", codex),
     `#!/usr/bin/env bash\n[ "$1" = login ] || exit 1\nrm -f "$CODEX_HOME/auth.json"\n${gate ? ': >"$HOME/started"; until [ -e "$HOME/go" ] || [ "$SECONDS" -ge 30 ]; do sleep 0.05; done\n' : ""}cp "$HOME/next.json" "$CODEX_HOME/auth.json"\n`,
   );
   return { ...f, review: `${f.dir}-review-home` };
@@ -442,7 +466,9 @@ it("signs in to the review home, records its ChatGPT workspace, and hands the si
     join(f.codex, "auth.json"),
   );
   const { stdout } = await f.step("review");
-  expect(stdout).toBe(`${f.review}\n${f.dir}-review-state\n${workspace}\n`);
+  expect(stdout).toBe(
+    `${shellPath(f.review)}\n${shellPath(f.dir)}-review-state\n${workspace}\n`,
+  );
   expect(
     JSON.parse(await readFile(join(f.codex, "auth.json"), "utf8")),
   ).toEqual(chatgpt);
@@ -487,7 +513,7 @@ it("prints no workspace once the shared sign-in names another, so reviews ask fo
   ]) {
     await writeFile(join(f.codex, "auth.json"), JSON.stringify(auth, null, 2));
     expect((await f.step("review")).stdout).toBe(
-      `${f.review}\n${f.dir}-review-state\n`,
+      `${shellPath(f.review)}\n${shellPath(f.dir)}-review-state\n`,
     );
   }
 });
@@ -511,7 +537,7 @@ it("keeps the shared sign-in when a sign-in is cancelled", async () => {
   await f.step("review");
   // As Codex does, it revokes the sign-in it finds, then stops.
   await writeFile(
-    join(f.dir, "0.1.0/bin/codex"),
+    join(f.dir, "0.1.0", codex),
     '#!/bin/sh\n[ ! -e "$CODEX_HOME/auth.json" ] || cp "$CODEX_HOME/auth.json" "$HOME/revoked"\nrm -f "$CODEX_HOME/auth.json"\nexit 1\n',
   );
   await expect(f.step("login")).rejects.toMatchObject({ code: 1 });
@@ -535,9 +561,9 @@ it("signs in to Buzz's home, as before, when Codex keeps sign-ins in the keyring
   await writeFile(join(review, "workspace"), "earlier\n");
   const { stdout, stderr } = await f.step("login");
   expect(stdout.trim().split("\n")).toEqual([
-    f.own,
+    shellPath(f.own),
     "-c",
-    `sqlite_home=${f.own}`,
+    `sqlite_home=${shellPath(f.own)}`,
     "login",
   ]);
   expect(stderr).toContain("can't use a sign-in kept in the keyring");
@@ -703,7 +729,7 @@ it("keeps a sign-in it fails to hand over, and hands it over on the next run", a
   );
   await chmod(join(bin, "mv"), 0o755);
   await expect(
-    run("bash", ["-c", script, "codex.sh", "run"], {
+    codexSh(["run"], {
       env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: f.home },
     }),
   ).rejects.toMatchObject({
@@ -722,7 +748,7 @@ it("lets go of the hand-over lock before Codex starts", async () => {
   const f = await echoing();
   const started = join(f.home, "started");
   await writeFile(
-    join(f.dir, "0.1.0/bin/codex"),
+    join(f.dir, "0.1.0", codex),
     `#!/bin/sh\n[ -e "${started}" ] && exit\n: >"${started}"\nexec sleep 60\n`,
   );
   await mkdir(f.own, { recursive: true });
@@ -842,10 +868,93 @@ it("never hard-links a file a link swapped in for the copy points to", async () 
     `#!/bin/sh\nfor f; do :; done\ncase "$f" in *.jsonl.*) rm -f "$f"; ln -s "${checker}" "$f" ;; esac\nexec /usr/bin/tail "$@"\n`,
   );
   await chmod(join(bin, "tail"), 0o755);
-  await run("bash", ["-c", script, "codex.sh", "adopt", "thread-1"], {
+  await codexSh(["adopt", "thread-1"], {
     env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home },
   });
   expect(await readFile(checker, "utf8")).toBe("checker\n");
   expect((await stat(checker)).nlink).toBe(1);
   expect((await lstat(copy)).isSymbolicLink()).toBe(true);
+});
+
+/** Git for Windows, as codex.sh sees it: its `uname`, and `codex.exe`
+ * releases. Its `ln` refuses links unless `links`, as Windows does without
+ * Developer Mode. */
+async function windows(links: boolean) {
+  const f = await disk([]);
+  // Where codex.sh keeps releases off macOS, whatever this computer is.
+  const dir = join(f.home, ".local/share/buzz/codex");
+  const bin = join(f.home, "bin");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "uname"),
+    '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo MINGW64_NT-10.0-26100\n',
+  );
+  await chmod(join(bin, "uname"), 0o755);
+  /** Windows without Developer Mode, from now on. */
+  const refuseLinks = async () => {
+    await writeFile(
+      join(bin, "ln"),
+      '#!/bin/sh\ncase "$1" in -s*) echo "Operation not permitted" >&2; exit 1 ;; esac\nexec /bin/ln "$@"\n',
+    );
+    await chmod(join(bin, "ln"), 0o755);
+  };
+  if (!links) await refuseLinks();
+  const binary = join(dir, "0.1.0/bin/codex.exe");
+  await mkdir(dirname(binary), { recursive: true });
+  await writeFile(binary, '#!/bin/sh\nprintf "%s\\n" "$CODEX_HOME" "$@"\n');
+  await chmod(binary, 0o755);
+  await writeFile(join(dir, "current"), "0.1.0");
+  const step = (...args: string[]) =>
+    codexSh(args, {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: f.home },
+    });
+  return {
+    ...f,
+    step,
+    refuseLinks,
+    dir,
+    own: `${dir}-home`,
+    codex: join(f.home, ".codex"),
+  };
+}
+
+it("runs codex.exe in Buzz's own home under Git for Windows", async () => {
+  const f = await windows(true);
+  const { stdout, stderr } = await f.step("run", "app-server");
+  expect(stdout.trim().split("\n")).toEqual([
+    shellPath(f.own),
+    "-c",
+    `sqlite_home=${shellPath(f.own)}`,
+    "app-server",
+  ]);
+  expect(stderr).toBe("");
+  for (const name of shared)
+    expect(await readlink(join(f.own, name))).toBe(join(f.codex, name));
+});
+
+it("runs Codex in the shared home, and says so, when Windows makes no links", async () => {
+  const f = await windows(false);
+  const { stdout, stderr } = await f.step("run", "app-server");
+  expect(stdout.trim().split("\n")).toEqual([
+    shellPath(f.codex),
+    "-c",
+    `sqlite_home=${shellPath(f.codex)}`,
+    "app-server",
+  ]);
+  expect(stderr).toContain("Buzz's Codex shares your Codex home");
+  // Signing in happens there too; reviews need links.
+  expect((await f.step("login")).stdout.trim().split("\n")).toEqual([
+    shellPath(f.codex),
+    "login",
+  ]);
+  await expect(f.step("review")).rejects.toThrow("need Developer Mode");
+});
+
+it("keeps links made before Windows stopped allowing new ones", async () => {
+  const f = await windows(true);
+  await f.step("run");
+  await f.refuseLinks();
+  const { stdout, stderr } = await f.step("run", "--version");
+  expect(stdout.trim().split("\n")[0]).toBe(shellPath(f.own));
+  expect(stderr).toBe("");
 });

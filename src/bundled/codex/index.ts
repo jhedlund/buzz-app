@@ -5,6 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { pubkeyOf } from "../../features/agents/membership";
 import { ownerReads } from "../../features/agents/reads";
 import type { PluginModule } from "../../plugins/api";
+import { onWindows } from "../git-bash";
 import { CodexLogoIcon } from "../../shared/design-system/icons";
 import { type Config, config, defaults, validWorkspace } from "./config";
 import { codexRun, TYPE_ID } from "./run";
@@ -18,10 +19,12 @@ import { AppServer, listModels } from "./rpc";
 const UPDATE_MS = 6 * 60 * 60_000;
 export const inject = ["agents", "host", "agentProtection"];
 export const apply: PluginModule["apply"] = (ctx) => {
-  // Only the desktop app can start `codex`, and setup and file uploads run
-  // `bash` and `base64`, which stock Windows lacks; no unusable type elsewhere.
-  if (!isTauri() || !/Mac|Linux/i.test(navigator.platform)) return;
-  const spawn = ctx.host.spawn && withScript(ctx.host.spawn.bind(ctx.host));
+  // Only the desktop app can start `codex`. Setup and file uploads run `bash`
+  // and `base64`, which on Windows come from Git for Windows: without it,
+  // Settings says so.
+  if (!isTauri() || !/Mac|Linux|Win/i.test(navigator.platform)) return;
+  const spawn =
+    ctx.host.spawn && withScript(ctx.host.spawn.bind(ctx.host), onWindows());
   const readFile = ctx.host.readFile?.bind(ctx.host);
   const setup = new CodexSetup(spawn, (input) => ctx.host.request(input));
   const start =

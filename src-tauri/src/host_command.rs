@@ -86,10 +86,6 @@ pub(crate) mod windows_job {
             })
         }
 
-        pub(super) fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
-            self.spawn_with_check(command, 0, |_, _| {})
-        }
-
         pub(crate) fn spawn_hidden(&self, command: &mut Command) -> std::io::Result<Child> {
             self.spawn_with_check(command, CREATE_NO_WINDOW, |_, _| {})
         }
@@ -379,9 +375,262 @@ pub(crate) fn resolve_program(program: &str, effective_path: &OsStr) -> PathBuf 
             return executable;
         }
     }
+    #[cfg(windows)]
+    if let Some(Ok(executable)) = git_bash::program(program) {
+        return executable;
+    }
     #[cfg(not(target_os = "macos"))]
     let _ = effective_path;
     PathBuf::from(program)
+}
+
+/// POSIX programs plugins declare, which Windows lacks or names a different
+/// program: a bare `bash` starts WSL, and `find` Windows' own find.exe. They
+/// run from Git for Windows, whose `bin\bash.exe` puts its tools first on PATH
+/// for the scripts it runs.
+#[cfg(windows)]
+pub(crate) mod git_bash {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use std::path::{Path, PathBuf};
+    use tokio::process::Command;
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    const PROGRAMS: [&str; 8] = ["bash", "base64", "dd", "find", "grep", "pwd", "uname", "wc"];
+
+    /// Where a declared program runs from, or why it can't: `None` for any
+    /// program not run from Git for Windows.
+    pub(crate) fn program(program: &str) -> Option<Result<PathBuf, String>> {
+        PROGRAMS.contains(&program).then(|| {
+            let git = install().ok_or_else(|| {
+                format!("{program} needs Git for Windows, from https://git-scm.com/download/win")
+            })?;
+            Ok(if program == "bash" {
+                git.join("bin").join("bash.exe")
+            } else {
+                git.join("usr").join("bin").join(format!("{program}.exe"))
+            })
+        })
+    }
+
+    /// Git for Windows' folder: as its installer records it, machine-wide or
+    /// for this user only, else the one whose `git.exe` is on PATH, such as
+    /// Portable Git. Read each time, so installing it needs no restart.
+    fn install() -> Option<PathBuf> {
+        [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+            .into_iter()
+            .filter_map(install_path)
+            .find(|git| has_bash(git))
+            .or_else(|| on_path(&std::env::var_os("PATH").unwrap_or_default()))
+    }
+
+    fn has_bash(git: &Path) -> bool {
+        git.join("bin").join("bash.exe").is_file()
+    }
+
+    /// The Git folder above a `git.exe` on `path`, which sits in its `cmd`,
+    /// `bin` or `mingw64\bin` folder.
+    fn on_path(path: &OsStr) -> Option<PathBuf> {
+        std::env::split_paths(path)
+            .filter(|folder| folder.join("git.exe").is_file())
+            .find_map(|folder| {
+                folder
+                    .ancestors()
+                    .skip(1)
+                    .take(2)
+                    .find(|git| has_bash(git))
+                    .map(Path::to_path_buf)
+            })
+    }
+
+    fn install_path(root: HKEY) -> Option<PathBuf> {
+        let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let (key, name) = (wide(r"SOFTWARE\GitForWindows"), wide("InstallPath"));
+        let mut buffer = [0u16; 1024];
+        let mut size = std::mem::size_of_val(&buffer) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        let length = (size as usize / 2).saturating_sub(1);
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
+        (!path.as_os_str().is_empty()).then_some(path)
+    }
+
+    /// Adds `args` for `program`. Git's runtime expands an unquoted argument's
+    /// `*` and `{a,b}` and mangles its quotes, as a POSIX shell would, so each
+    /// argument for its programs is quoted. Others keep Rust's own quoting,
+    /// which batch files need.
+    pub(crate) fn add_args<'a>(
+        command: &mut Command,
+        program: &Path,
+        args: impl IntoIterator<Item = &'a String>,
+    ) {
+        let ours = install().is_some_and(|git| program.starts_with(git));
+        for arg in args {
+            if ours {
+                command.raw_arg(quote(OsStr::new(arg)));
+            } else {
+                command.arg(arg);
+            }
+        }
+    }
+
+    /// One argument in double quotes, read back unchanged by the Microsoft C
+    /// runtime's rules, which Git's runtime follows inside quotes.
+    pub(crate) fn quote(arg: &OsStr) -> std::ffi::OsString {
+        let backslash = u16::from(b'\\');
+        let quote = u16::from(b'"');
+        let mut quoted = vec![quote];
+        let mut backslashes = 0;
+        for unit in arg.encode_wide() {
+            if unit == backslash {
+                backslashes += 1;
+                continue;
+            }
+            // Backslashes before a quote are doubled, and the quote escaped.
+            let escape = if unit == quote {
+                backslashes * 2 + 1
+            } else {
+                backslashes
+            };
+            quoted.extend(std::iter::repeat_n(backslash, escape));
+            quoted.push(unit);
+            backslashes = 0;
+        }
+        // Doubled before the closing quote, so they stay backslashes.
+        quoted.extend(std::iter::repeat_n(backslash, backslashes * 2));
+        quoted.push(quote);
+        std::ffi::OsString::from_wide(&quoted)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Splits a command line the way the Microsoft C runtime does.
+        fn split(line: &str) -> Vec<String> {
+            let mut args = Vec::new();
+            let (mut current, mut quoted, mut backslashes) = (String::new(), false, 0usize);
+            let mut any = false;
+            for character in line.chars() {
+                match character {
+                    '\\' => backslashes += 1,
+                    '"' => {
+                        current.extend(std::iter::repeat_n('\\', backslashes / 2));
+                        if backslashes % 2 == 1 {
+                            current.push('"');
+                        } else {
+                            quoted = !quoted;
+                        }
+                        backslashes = 0;
+                        any = true;
+                    }
+                    ' ' if !quoted => {
+                        current.extend(std::iter::repeat_n('\\', backslashes));
+                        backslashes = 0;
+                        if any || !current.is_empty() {
+                            args.push(std::mem::take(&mut current));
+                        }
+                        any = false;
+                    }
+                    _ => {
+                        current.extend(std::iter::repeat_n('\\', backslashes));
+                        backslashes = 0;
+                        current.push(character);
+                        any = true;
+                    }
+                }
+            }
+            current.extend(std::iter::repeat_n('\\', backslashes));
+            if any || !current.is_empty() {
+                args.push(current);
+            }
+            args
+        }
+
+        #[test]
+        fn every_argument_is_quoted_and_reads_back_unchanged() {
+            let args = [
+                r#"{"mcpServers":{"buzz":{"type":"sdk"}}}"#,
+                r#"x"y"#,
+                r"C:\dir\",
+                r#"a\"b"#,
+                "",
+                "two words",
+                "a{b,c}",
+                "*",
+                r"trailing\\",
+            ];
+            let line = args
+                .iter()
+                .map(|arg| quote(OsStr::new(arg)).into_string().unwrap())
+                .collect::<Vec<_>>();
+            assert!(line
+                .iter()
+                .all(|arg| arg.starts_with('"') && arg.ends_with('"')));
+            assert_eq!(split(&line.join(" ")), args);
+        }
+
+        #[test]
+        fn finds_git_from_its_git_exe_on_path() {
+            let folder = tempfile::tempdir().unwrap();
+            let make = |file: &str| {
+                let file = folder.path().join(file);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "").unwrap();
+            };
+            for layout in ["installed", "portable", "no-bash"] {
+                make(&format!(r"{layout}\cmd\git.exe"));
+            }
+            make(r"installed\bin\bash.exe");
+            make(r"portable\mingw64\bin\git.exe");
+            make(r"portable\bin\bash.exe");
+            let path = |folders: &[&str]| {
+                std::env::join_paths(folders.iter().map(|f| folder.path().join(f))).unwrap()
+            };
+            assert_eq!(
+                on_path(&path(&[r"no-bash\cmd", r"installed\cmd"])),
+                Some(folder.path().join("installed"))
+            );
+            assert_eq!(
+                on_path(&path(&[r"portable\mingw64\bin"])),
+                Some(folder.path().join("portable"))
+            );
+            assert_eq!(on_path(&path(&[r"no-bash\cmd", "nowhere"])), None);
+        }
+
+        #[test]
+        fn only_declared_posix_programs_run_from_git() {
+            assert!(program("node").is_none());
+            assert!(program("claude").is_none());
+            for name in PROGRAMS {
+                let Some(found) = program(name) else {
+                    panic!("{name} is not mapped");
+                };
+                match (found, install()) {
+                    (Ok(path), Some(git)) => {
+                        assert!(path.starts_with(&git), "{name}: {}", path.display());
+                        assert!(path.is_file(), "{name}: {}", path.display());
+                    }
+                    (Err(reason), None) => assert!(reason.contains("Git for Windows")),
+                    (found, git) => panic!("{name}: {found:?} with Git at {git:?}"),
+                }
+            }
+        }
+    }
 }
 
 async fn run_command(
@@ -458,8 +707,11 @@ async fn run_output_with_input(
     group: Option<&AtomicI32>,
 ) -> Option<(String, std::process::ExitStatus)> {
     let mut command = Command::new(executable);
+    #[cfg(windows)]
+    git_bash::add_args(&mut command, executable, args);
+    #[cfg(not(windows))]
+    command.args(args);
     command
-        .args(args)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -476,8 +728,9 @@ async fn run_output_with_input(
 
     #[cfg(windows)]
     let _job = windows_job::WindowsJob::new()?;
+    // Hidden: started from the windowed app, a console program opens a window.
     #[cfg(windows)]
-    let mut child = _job.spawn(&mut command).ok()?;
+    let mut child = _job.spawn_hidden(&mut command).ok()?;
     #[cfg(not(windows))]
     let mut child = command.spawn().ok()?;
     #[cfg(unix)]

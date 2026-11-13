@@ -9,7 +9,13 @@ import script from "./claude.sh?raw";
 import manifest from "./manifest.json";
 import { PROTECTED_CLAUDE_ROOT, PROTECTED_CLAUDE_VERSION } from "./security";
 import { ClaudeAuth, type Step } from "./auth";
-import { checkClaude, ClaudeSetup, MIN_VERSION, withScript } from "./setup";
+import {
+  checkClaude,
+  ClaudeSetup,
+  MIN_VERSION,
+  platformOf,
+  withScript,
+} from "./setup";
 
 /** Native's Claude key store (`claude_key.rs`): whether a key is saved. */
 const nativeKey = vi.hoisted(() => ({ saved: true }));
@@ -725,6 +731,37 @@ it("starts Claude and its install steps as steps of claude.sh", async () => {
     { id: "platform", args: [] },
     { id: "claude-protected-arm64", args: ["--version"] },
   ]);
+});
+
+it("starts claude.sh from the environment and names the workspace as Windows does, on Windows", async () => {
+  const { spawn, calls } = scripted({});
+  const run = withScript(spawn, true);
+  await run("claude", { args: ["--version"] });
+  await run("workspace", { cwd: "~/work" });
+  await run("platform");
+  expect(calls).toEqual([
+    {
+      id: "claude-sh",
+      args: [
+        expect.stringContaining('eval "$buzz_script"'),
+        "claude.sh",
+        "run",
+        "--version",
+      ],
+    },
+    { id: "claude-sh", args: ["pwd -W"] },
+    { id: "platform", args: [] },
+  ]);
+});
+
+it("downloads the release for this computer's platform", () => {
+  expect(platformOf("Darwin arm64\n")).toBe("darwin-arm64");
+  expect(platformOf("Linux x86_64")).toBe("linux-x64");
+  expect(platformOf("MINGW64_NT-10.0-26100 x86_64\n")).toBe("win32-x64");
+  expect(platformOf("MSYS_NT-10.0-26100 x86_64")).toBe("win32-x64");
+  expect(platformOf("MINGW64_NT-10.0-26100-ARM64 aarch64")).toBe("win32-arm64");
+  expect(platformOf("MINGW32_NT-10.0-26100 i686")).toBeUndefined();
+  expect(platformOf("FreeBSD amd64")).toBeUndefined();
 });
 
 /** A Mac on which the host starts the pinned protected copy once

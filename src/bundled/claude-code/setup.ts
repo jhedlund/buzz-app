@@ -12,6 +12,7 @@ import type {
 import { ClaudeAuth } from "./auth";
 import { ClaudeProcess, ENV, type ClaudeModel, type Spawn } from "./claude";
 import script from "./claude.sh?raw";
+import { scriptOptions, windowsMachine, WINDOWS_PWD } from "../git-bash";
 import {
   PROTECTED_CLAUDE_ROOT,
   PROTECTED_CLAUDE_VERSION,
@@ -45,6 +46,15 @@ const PLATFORMS: Readonly<Record<string, string>> = {
   "Linux aarch64": "linux-arm64",
   "Linux x86_64": "linux-x64",
 };
+const WINDOWS_PLATFORMS: Readonly<Record<string, string>> = {
+  x86_64: "win32-x64",
+  aarch64: "win32-arm64",
+  arm64: "win32-arm64",
+};
+export const platformOf = (uname: string) => {
+  const machine = windowsMachine(uname);
+  return machine ? WINDOWS_PLATFORMS[machine] : PLATFORMS[uname.trim()];
+};
 
 /** The `claude.sh` step behind each process the plugin starts by name. */
 const STEPS: Readonly<Record<string, string>> = {
@@ -54,17 +64,26 @@ const STEPS: Readonly<Record<string, string>> = {
   review: "review",
 };
 /** Starts `claude` and its other steps as steps of `claude.sh`, which the
- * manifest grants as `bash -c`; other processes start as declared. */
+ * manifest grants as `bash -c`; other processes start as declared, but for
+ * the workspace on Windows, which names the folder as Windows does. */
 export const withScript =
-  (spawn: Spawn): Spawn =>
+  (spawn: Spawn, windows = false): Spawn =>
   (id, options) => {
     const step = STEPS[id];
-    return step
-      ? spawn("claude-sh", {
-          ...options,
-          args: [script, "claude.sh", step, ...(options?.args ?? [])],
-        })
-      : spawn(id, options);
+    if (step)
+      return spawn(
+        "claude-sh",
+        scriptOptions(
+          script,
+          "claude.sh",
+          [step, ...(options?.args ?? [])],
+          options,
+          windows,
+        ),
+      );
+    if (windows && id === "workspace")
+      return spawn("claude-sh", { ...options, args: [WINDOWS_PWD] });
+    return spawn(id, options);
   };
 
 /** Orders `a.b.c` versions; negative when `a` is older. */
@@ -543,8 +562,7 @@ export class ClaudeSetup {
       throw new Error(
         `Claude ${latest} is older than Buzz needs (${MIN_VERSION}).`,
       );
-    const platform =
-      PLATFORMS[(await collect(spawn, "platform", [])).stdout.trim()];
+    const platform = platformOf((await collect(spawn, "platform", [])).stdout);
     if (!platform) throw new Error("Claude is not available for this computer");
     const manifest = JSON.parse(
       await this.fetch(`${latest}/manifest.json`),
@@ -643,8 +661,9 @@ export class ClaudeSetup {
       signal.throwIfAborted();
     }
     this.protectedDownload ??= (async () => {
-      const platform =
-        PLATFORMS[(await collect(spawn, "platform", [])).stdout.trim()];
+      const platform = platformOf(
+        (await collect(spawn, "platform", [])).stdout,
+      );
       if (!platform)
         throw new Error("Claude is not available for this computer");
       const manifest = JSON.parse(
