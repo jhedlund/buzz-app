@@ -112,6 +112,8 @@ export type ComposerInputElement = HTMLDivElement & {
     terminator?: string,
     /** Automatic edits preserve focus and the current selection. */
     focus?: boolean,
+    /** Called when the text would make the draft too long. */
+    onTooLong?: () => void,
   ): boolean;
   replaceRecipients(recipients: readonly MentionRecipient[]): boolean;
   /** Replace the typed `@name` with a chip the host is still resolving,
