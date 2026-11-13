@@ -52,6 +52,8 @@ import usageManifest from "./usage/manifest.json";
 import * as usage from "./usage";
 import inboxManifest from "./inbox/manifest.json";
 import * as inbox from "./inbox";
+import threadsManifest from "./threads/manifest.json";
+import * as threads from "./threads";
 import focusManifest from "./focus/manifest.json";
 import * as focus from "./focus";
 import remindersManifest from "./reminders/manifest.json";
@@ -206,6 +208,11 @@ export const bundledPlugins: readonly BundledPlugin[] = [
   {
     manifest: { ...inboxManifest, apiVersion: 1 },
     module: inbox,
+    enabledByDefault: true,
+  },
+  {
+    manifest: { ...threadsManifest, apiVersion: 1 },
+    module: threads,
     enabledByDefault: true,
   },
   {

@@ -2648,6 +2648,9 @@ export function createRelaySession(
     sidebarPreferences: sidebarPreferences.queries,
     /** The account's saved main agent, shared by every install. */
     mainAgent,
+    /** The viewer's private pinned and done threads; host-only. */
+    readThreadMarks: transport?.readThreadMarks,
+    writeThreadMarks: transport?.writeThreadMarks,
     soloPreferences: soloPreferences.queries,
     reminders: reminders?.capability,
     live,

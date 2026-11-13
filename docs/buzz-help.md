@@ -493,6 +493,24 @@ and are asked to sign in again in Buzz.
   New reactions from updated clients appear; older unaddressed reactions are not backfilled.
   While Buzz is visible, a live reaction briefly replaces the Activity bell with its emoji for three seconds.
   Further reactions during that hold do not change the icon; history loading does not trigger it.
+- **Threads** (below Activity in the Messages sidebar, or Cmd/Ctrl+Shift+H) lists threads that have a
+  title in channels you have joined, most recent reply or title change first. Choose one to open the thread,
+  or narrow the list with the channel menu; the **×** beside it shows all channels again. **Rename** edits a
+  title in place (Enter saves, Escape cancels); saving it empty removes the title for everyone. If someone
+  else changed the title first, nothing is overwritten: refresh and try again.
+  On the desktop app, **Pin** keeps a thread in a Pinned section at the top, and **Mark done** moves it into
+  a collapsed Done section until it has new activity; a pinned thread stays pinned even when done. Pins and
+  done marks are private to you, follow you across your desktops, and are the ones Buzz 0.x shows.
+  A thread you follow shows its unread reply count (**Mark read** clears it), and a thread with an agent
+  working in it shows how long it has been working. Unread replies bring a done thread back to Threads.
+  The sidebar's Threads entry shows a dot while a named thread is unread, or how many have agents working. Titles are shared,
+  channel-visible data that agents and the `buzz threads title` CLI also set, and Buzz 0.x shows the same
+  titles; they are not searchable. A titled thread shows its title under its first message in the channel
+  (choose it to open the thread) and on its thread tab. Renaming a thread tab sets the shared title; if that
+  can't be saved, the name stays on that tab on this device only. When you start a thread by mentioning
+  agents, the first one you mention gives it a title if it has none; agents never rename a titled thread. Title changes and new replies update the
+  list, which stays loaded while you use other pages; **Refresh** reads it again. Provided by the optional
+  Named threads plugin, on by default.
 - **New messages** marks the first known unread incoming channel message when
   you enter. Once established, the divider stays in place for that visit as you
   read, reveal another message, or receive new messages. In a channel with more

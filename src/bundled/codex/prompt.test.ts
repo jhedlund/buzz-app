@@ -70,3 +70,45 @@ it("names the agent's workspace for a thread in a conversation folder", () => {
     "Your persistent workspace is in your working directory:",
   );
 });
+
+it("asks the agents a person names in a new top-level message to title it", () => {
+  const ask = "call `thread_title` with `if_unset: true`";
+  const agent = "c".repeat(64);
+  const mention = (tags: string[][]) =>
+    ({ ...event, tags: [["h", "chan"], ...tags] }) as EventData;
+  const root = { channelId: "chan", name: "general" };
+  expect(turnInput(agent, mention([["p", agent]]), root, "hi")).toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([
+        ["p", "b".repeat(64)],
+        ["p", agent],
+      ]),
+      root,
+      "hi",
+    ),
+  ).toContain(ask);
+  expect(
+    turnInput(agent, mention([["p", "b".repeat(64)]]), root, "hi"),
+  ).not.toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([
+        ["p", agent],
+        ["e", "d".repeat(64), "", "reply"],
+      ]),
+      root,
+      "hi",
+    ),
+  ).not.toContain(ask);
+  expect(
+    turnInput(
+      agent,
+      mention([["p", agent]]),
+      { ...root, topLevel: true },
+      "hi",
+    ),
+  ).not.toContain(ask);
+});

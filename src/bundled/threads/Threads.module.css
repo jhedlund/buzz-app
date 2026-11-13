@@ -1,0 +1,114 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+  padding: var(--space-2) var(--space-row-gap);
+}
+
+.notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-row-gap);
+}
+
+.scroller {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2) var(--space-row-gap);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  min-width: 0;
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex: none;
+  align-self: center;
+  margin-inline-end: var(--space-control-inset);
+}
+
+/* As the channel list marks unread: read titles in the quieter navigation
+   ink, unread ones in the unread ink at the heavier weight. */
+.title {
+  color: var(--text-navigation);
+}
+
+.title[data-unread] {
+  color: var(--text-navigation-unread);
+  font-weight: var(--type-weight-semibold);
+}
+
+.unreadDot {
+  display: block;
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--affordance-prominent-mark);
+}
+
+.signals {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.working {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-subtle);
+}
+
+.badgeWorking {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.badgeDot {
+  display: block;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 50%;
+  background: var(--affordance-prominent-mark);
+}
+
+/* Row actions show on row hover or keyboard focus (not any focus: a clicked
+   button keeps focus, which would leave them shown), always without hover. */
+.row [data-reveal] {
+  opacity: 0;
+}
+
+:is(.row:hover, .row:has(:focus-visible)) [data-reveal] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .row [data-reveal] {
+    opacity: 1;
+  }
+}

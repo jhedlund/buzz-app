@@ -641,3 +641,12 @@ export const FoldIcon = defineIcon("tabler", TablerFoldIcon);
 
 import TablerCircleDottedIcon from "@tabler/icons-react/dist/esm/icons/IconCircleDotted.mjs";
 export const CircleDottedIcon = defineIcon("tabler", TablerCircleDottedIcon);
+import TablerPinIcon from "@tabler/icons-react/dist/esm/icons/IconPin.mjs";
+export const PinIcon = defineIcon("tabler", TablerPinIcon);
+import TablerPinFilledIcon from "@tabler/icons-react/dist/esm/icons/IconPinFilled.mjs";
+export const PinFilledIcon = defineIcon("tabler", TablerPinFilledIcon);
+import TablerCheckCircleFilledIcon from "@tabler/icons-react/dist/esm/icons/IconCircleCheckFilled.mjs";
+export const CheckCircleFilledIcon = defineIcon(
+  "tabler",
+  TablerCheckCircleFilledIcon,
+);

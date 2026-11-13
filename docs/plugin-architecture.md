@@ -1295,7 +1295,7 @@ contracts with their own layout and local navigation.
 **Channels is the only required bundled plugin.** Todos, Usage, Reminders,
 Workflows, Changesets, Shared compute and Charts are off by default for fresh installs. Bestie,
 Feedback, Diff viewer, Identity Naming, Agent Activity, Terminal, Links, GitHub, Inbox,
-Repositories, Agents, Claude, Codex, Builderlab,
+Named threads, Repositories, Agents, Claude, Codex, Builderlab,
 Membership, and Moderation are on by default, but optional. Both browser and
 native catalogs declare that policy.
 
