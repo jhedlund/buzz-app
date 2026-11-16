@@ -2,7 +2,8 @@
 // Threads page reopens at once. Each title gets one `#e` read when it appears
 // (again after it leaves and comes back); live replies keep it current from
 // then on, including while the page is closed. Once started it stays on for
-// the session, holding the title store with it.
+// the session, holding the title store with it, until shared titles are
+// switched off.
 //
 // Relay reads per session: sum over titled channels of ceil(roots/100) `#e`
 // reads when the page first opens, four at a time; one per newly titled
@@ -10,7 +11,11 @@
 // missed). Refresh repeats the first-open reads.
 import { useSyncExternalStore } from "react";
 import type { RelaySession } from "../relay/session";
-import { threadTitleStore } from "./thread-title-store";
+import {
+  subscribeThreadTitlesSwitch,
+  threadTitlesEnabled,
+  threadTitleStore,
+} from "./thread-title-store";
 import { noteReplies, readActivity } from "./thread-titles";
 
 type Session = Pick<
@@ -106,12 +111,31 @@ function createStore(session: Session): ThreadActivityStore {
       },
     );
   };
+  let stops: (() => void)[] = [];
+  // Switched off, it lets go of the titles and the live route and forgets
+  // what it read; the next subscriber starts it again.
+  const stop = () => {
+    for (const s of stops) s();
+    stops = [];
+    started = false;
+    controller.abort();
+    controller = new AbortController();
+    read.clear();
+    latest.clear();
+    ids.clear();
+    publish();
+  };
   const start = () => {
     started = true;
-    titles.subscribe(onTitles);
+    stops = [
+      subscribeThreadTitlesSwitch(() => {
+        if (!threadTitlesEnabled()) stop();
+      }),
+      titles.subscribe(onTitles),
+    ];
     // Replay too: a reply that arrived while disconnected comes back in the
     // reconnect replay, and no new #e read would find it for a row already read.
-    session.subscribeLive(
+    const stopLive = session.subscribeLive(
       ({ events }) => {
         const current = titles.snapshot().titles;
         if (!current?.size) return;
@@ -123,13 +147,14 @@ function createStore(session: Session): ThreadActivityStore {
       },
       { replay: true },
     );
+    stops.push(stopLive);
     onTitles();
   };
   return {
     snapshot: () => snapshot,
     subscribe(listener) {
       listeners.add(listener);
-      if (!started) start();
+      if (!started && threadTitlesEnabled()) start();
       return () => {
         listeners.delete(listener);
       };

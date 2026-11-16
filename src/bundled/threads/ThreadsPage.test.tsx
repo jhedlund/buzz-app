@@ -13,6 +13,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Navigation } from "../../features/navigation/controller";
 import type { ReadFilter, RelayEvent } from "../../features/relay/events";
 import type { RelaySession } from "../../features/relay/session";
+import { enableThreadTitles } from "../../features/messages/thread-title-store";
 import { titleRevision } from "../../features/messages/thread-titles";
 import { ThreadsView } from "./ThreadsPage";
 
@@ -260,7 +261,9 @@ const rows = async () =>
     .queryAllByRole("listitem")
     .map((item) => item.textContent?.split("·")[0]?.trim());
 
+let disable: (() => void) | undefined;
 beforeEach(() => {
+  disable = enableThreadTitles();
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -273,6 +276,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  disable?.();
 });
 
 it("lists titles newest activity first with their channel, and opens the thread root", async () => {
@@ -377,6 +381,26 @@ it("reopens with no relay reads and keeps replies that arrived while closed", as
   ]);
   expect(f.snapshotRead).toHaveBeenCalledTimes(titleReads);
   expect(f.read).toHaveBeenCalledTimes(2);
+});
+
+it("lets go of titles and live replies once shared titles are switched off", async () => {
+  const f = await fixture();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  // As when Named threads is turned off: the page goes, and so does the
+  // session-long reply tracking that outlives it.
+  f.view.unmount();
+  expect(f.live.events).toBeDefined();
+  act(() => disable?.());
+  expect(f.live.events).toBeUndefined();
+  expect(f.live.titles).toBeUndefined();
+  // Turned on again, the page reads titles and replies afresh.
+  act(() => {
+    disable = enableThreadTitles();
+  });
+  f.mount();
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  expect(f.live.events).toBeDefined();
+  expect(f.read).toHaveBeenCalledTimes(4);
 });
 
 it("renames inline with Enter and cancels with Escape", async () => {

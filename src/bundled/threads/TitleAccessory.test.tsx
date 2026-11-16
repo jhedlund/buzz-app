@@ -2,14 +2,22 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ComposerAccessoryProps } from "../../features/conversation/contracts";
+import { enableThreadTitles } from "../../features/messages/thread-title-store";
 import { titleRevision } from "../../features/messages/thread-titles";
 import type { ChannelMessage } from "../../features/relay/contracts";
 import type { RelaySession } from "../../features/relay/session";
 import { TitleAccessory } from "./TitleAccessory";
 
-afterEach(cleanup);
+let disable: (() => void) | undefined;
+beforeEach(() => {
+  disable = enableThreadTitles();
+});
+afterEach(() => {
+  cleanup();
+  disable?.();
+});
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
 const ROOT = "a".repeat(64);

@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ReadFilter, RelayEvent } from "../relay/events";
 import type { RelaySession } from "../relay/session";
-import { threadTitleStore } from "./thread-title-store";
+import {
+  enableThreadTitles,
+  threadTitlesEnabled,
+  threadTitleStore,
+} from "./thread-title-store";
 import { titleRevision } from "./thread-titles";
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
@@ -142,5 +146,18 @@ describe("thread title store", () => {
     expect(store.snapshot().titles?.size).toBe(0);
     expect(f.session.artifacts.follow).not.toHaveBeenCalled();
     stop();
+  });
+});
+
+describe("shared title switch", () => {
+  it("stays on while any enabler is live, so a late dispose of a replaced plugin can't turn it off", () => {
+    expect(threadTitlesEnabled()).toBe(false);
+    const first = enableThreadTitles();
+    const second = enableThreadTitles();
+    first();
+    first();
+    expect(threadTitlesEnabled()).toBe(true);
+    second();
+    expect(threadTitlesEnabled()).toBe(false);
   });
 });

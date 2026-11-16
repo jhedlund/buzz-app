@@ -55,9 +55,54 @@ export function threadTitleStore(session: Session): ThreadTitleStore {
   return store;
 }
 
+// Shared titles are on only while a plugin that offers them runs (it calls
+// enableThreadTitles in an effect). A host plugin such as Channels can't see
+// another plugin's state, so the switch lives here: while it is off, nothing
+// reads titles and thread tabs keep device-local names.
+let enabled = 0;
+const switchListeners = new Set<() => void>();
+const flip = (by: number) => {
+  enabled += by;
+  for (const listener of [...switchListeners]) listener();
+};
+
+/** Turns shared titles on; the returned disposer turns them off again. */
+export function enableThreadTitles() {
+  let on = true;
+  flip(1);
+  return () => {
+    if (!on) return;
+    on = false;
+    flip(-1);
+  };
+}
+
+export const threadTitlesEnabled = () => enabled > 0;
+
+export const subscribeThreadTitlesSwitch = (listener: () => void) => {
+  switchListeners.add(listener);
+  return () => {
+    switchListeners.delete(listener);
+  };
+};
+
+const NONE: ThreadTitles = { titles: new Map(), partial: false };
+const off = () => NONE;
+const idle = () => () => {};
+
+/** No titles, and no relay reads, while shared titles are off. */
 export function useThreadTitles(session: Session) {
   const store = threadTitleStore(session);
-  return useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
+  const on = useSyncExternalStore(
+    subscribeThreadTitlesSwitch,
+    threadTitlesEnabled,
+    threadTitlesEnabled,
+  );
+  return useSyncExternalStore(
+    on ? store.subscribe : idle,
+    on ? store.snapshot : off,
+    on ? store.snapshot : off,
+  );
 }
 
 export function useThreadTitle(

@@ -229,7 +229,8 @@ export async function readTitles(
 const ACTIVITY_CONCURRENCY = 4;
 
 /** Newest reply per channel and root (see activityKey), read by `#e` on the
- * roots in each channel, ACTIVITY_CONCURRENCY reads at a time. Activity only
+ * roots in each channel, ACTIVITY_CONCURRENCY reads at a time. A root a full
+ * page left out is read again with the others it left out. Activity only
  * refines the order: a failed read leaves those roots at their title time. */
 export async function readActivity(
   session: Pick<RelaySession, "read">,
@@ -262,6 +263,20 @@ export async function readActivity(
         latest,
         ids,
       );
+      // The limit is shared by the batch: a full page may have cut off every
+      // reply of a quieter root. Those roots are read again on their own;
+      // each full page names at least one root, so the batch shrinks. With
+      // ids, a root whose newest second is the page's last may be missing
+      // some of that second's replies, so it is read again too.
+      if (replies.length >= PAGE) {
+        const last = Math.min(...replies.map((r) => r.created_at));
+        const unseen = batch.filter((root) => {
+          const at = latest.get(activityKey(channel, root));
+          return at === undefined || (!!ids && at === last);
+        });
+        if (unseen.length && unseen.length < batch.length)
+          batches.push([channel, unseen]);
+      }
     } catch (error) {
       signal.throwIfAborted();
       console.warn("Thread activity read failed", error);

@@ -22,6 +22,7 @@ import { useTabDrag } from "../../features/panels/useTabDrag";
 import { PanelCard } from "../../features/panels/PanelCard";
 import type { MessageLinkOrigin } from "../../features/messages/MessageRow";
 import {
+  threadTitlesEnabled,
   threadTitleStore,
   useThreadTitles,
 } from "../../features/messages/thread-title-store";
@@ -801,10 +802,11 @@ export function useConversationTabs({
       .slice(0, 80);
     return text || (name ? `Thread · ${name}` : "Thread");
   }
-  // Renaming a thread tab names the thread for everyone. The typed name shows
-  // on this tab until the write lands, and stays there if it fails. A blank
-  // name only drops the local one; the Threads page clears shared titles.
+  // With shared titles on, renaming a thread tab names the thread for
+  // everyone. The typed name shows on this tab until the write lands, and
+  // stays there if it fails. A blank name only drops the local one.
   function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
+    if (!threadTitlesEnabled()) return tabState.renameTab(tab.id, name);
     const rootId = rootOfTab(tab);
     const read = queries.snapshotRead;
     const writer = queries.configArtifactWriter;

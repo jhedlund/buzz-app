@@ -1,3 +1,4 @@
+import { enableThreadTitles } from "../../features/messages/thread-title-store";
 import type { PluginModule } from "../../plugins/api";
 import { ThreadsBadge } from "./ThreadsBadge";
 import { ThreadsPage } from "./ThreadsPage";
@@ -11,6 +12,7 @@ export const inject = [
   "conversation",
 ];
 export const apply: PluginModule["apply"] = (ctx) => {
+  ctx.effect(() => enableThreadTitles());
   const relay = ctx.relay;
   const navigator = ctx.navigation;
   // Activity owns Cmd+Shift+T (its threads filter).

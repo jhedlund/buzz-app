@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { enableThreadTitles } from "../../features/messages/thread-title-store";
 import { titleRevision } from "../../features/messages/thread-titles";
 import type { Panels } from "../../features/panels/service";
 import type { ReadFilter, RelayEvent } from "../../features/relay/events";
@@ -10,7 +11,15 @@ import type { RelaySession } from "../../features/relay/session";
 import { channelTabs, useChannelTabState } from "./useChannelTabState";
 import { useConversationTabs } from "./useConversationTabs";
 
-afterEach(cleanup);
+// The Named threads plugin turns shared titles on while it runs.
+let disable: (() => void) | undefined;
+beforeEach(() => {
+  disable = enableThreadTitles();
+});
+afterEach(() => {
+  cleanup();
+  disable?.();
+});
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
 const ROOT = "a".repeat(64);
@@ -42,19 +51,25 @@ async function harness({
     );
   });
   const channels = [{ id: ALPHA, name: "alpha" }];
+  const writer = {
+    sign: vi.fn(async (t: { tags: string[][]; content: string }) => ({
+      ...t,
+      kind: 45010,
+      created_at: 1,
+      id: "new",
+      pubkey: "f".repeat(64),
+      sig: "",
+    })),
+    publish,
+  };
+  const writerTaken = vi.fn();
   const session = {
     viewer: "viewer",
     snapshotRead,
-    configArtifactWriter: {
-      sign: vi.fn(async (t: { tags: string[][]; content: string }) => ({
-        ...t,
-        kind: 45010,
-        created_at: 1,
-        id: "new",
-        pubkey: "f".repeat(64),
-        sig: "",
-      })),
-      publish,
+    // Counted: only a shared title write takes the writer.
+    get configArtifactWriter() {
+      writerTaken();
+      return writer;
     },
     artifacts: { follow: () => () => {} },
     channels: {
@@ -104,7 +119,7 @@ async function harness({
         | { name?: string }
         | undefined
     )?.name;
-  return { session, publish, snapshotRead, item, localName };
+  return { session, publish, snapshotRead, writerTaken, item, localName };
 }
 
 it("labels a thread tab with its local name, then its shared title, then its text", async () => {
@@ -177,4 +192,34 @@ it("an empty rename clears only the local name, never the shared title", async (
   expect(h.localName()).toBeFalsy();
   expect(h.item()?.label).toBe("Launch plan");
   expect(h.publish).not.toHaveBeenCalled();
+});
+
+it("with shared titles off, a tab shows no shared title and renames stay local", async () => {
+  disable?.();
+  const h = await harness({ title: "Launch plan" });
+  expect(h.item()?.label).toBe("Original message");
+  act(() => h.item()?.rename?.("Mine"));
+  expect(h.localName()).toBe("Mine");
+  expect(h.item()?.label).toBe("Mine");
+  // A shared write takes the writer as it starts, before any await.
+  expect(h.writerTaken).not.toHaveBeenCalled();
+  expect(h.snapshotRead).not.toHaveBeenCalled();
+  expect(h.publish).not.toHaveBeenCalled();
+});
+
+it("follows shared titles being switched off and on while a tab is open", async () => {
+  const h = await harness({ title: "Launch plan" });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => disable?.());
+  expect(h.item()?.label).toBe("Original message");
+  act(() => h.item()?.rename?.("Mine"));
+  expect(h.localName()).toBe("Mine");
+  expect(h.writerTaken).not.toHaveBeenCalled();
+  act(() => h.item()?.rename?.(""));
+  act(() => {
+    disable = enableThreadTitles();
+  });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("Ship plan"));
+  await waitFor(() => expect(h.publish).toHaveBeenCalledTimes(1));
 });

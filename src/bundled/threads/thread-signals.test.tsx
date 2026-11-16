@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { enableThreadTitles } from "../../features/messages/thread-title-store";
 import {
   activityKey,
   titleRevision,
@@ -10,7 +11,14 @@ import type { RelaySession } from "../../features/relay/session";
 import { SessionBadge } from "./ThreadsBadge";
 import { unreadByThread, workingByThread } from "./thread-signals";
 
-afterEach(cleanup);
+let disable: (() => void) | undefined;
+beforeEach(() => {
+  disable = enableThreadTitles();
+});
+afterEach(() => {
+  cleanup();
+  disable?.();
+});
 
 const ALPHA = "11111111-1111-4111-8111-111111111111";
 const A = "a".repeat(64);

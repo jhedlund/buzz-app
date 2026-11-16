@@ -1,13 +1,17 @@
 import { expect, it, vi } from "vitest";
+import { threadTitlesEnabled } from "../../features/messages/thread-title-store";
 import { apply } from "./index";
 import manifest from "./manifest.json";
 
-it("registers the Threads page, a shortcut that opens it and the timeline title", () => {
+it("turns shared titles on while it runs and registers the Threads page, a shortcut that opens it and the timeline title", () => {
   const shortcuts = { register: vi.fn() };
   const pages = { register: vi.fn() };
   const conversation = { registerAccessory: vi.fn() };
   const open = vi.fn();
+  const effects: (() => () => void)[] = [];
+  const effect = (run: () => () => void) => effects.push(run);
   apply({
+    effect,
     pages,
     relay: {},
     navigation: { open },
@@ -38,4 +42,8 @@ it("registers the Threads page, a shortcut that opens it and the timeline title"
     primary: true,
   });
   expect(manifest).not.toHaveProperty("host");
+  const stop = effects[0]?.();
+  expect(threadTitlesEnabled()).toBe(true);
+  stop?.();
+  expect(threadTitlesEnabled()).toBe(false);
 });
