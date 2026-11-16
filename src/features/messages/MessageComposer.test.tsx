@@ -16559,7 +16559,9 @@ describe("oversized paste feedback", () => {
   it("offers a file only when the composer supports attachments", () => {
     const h = mount();
     h.retarget({ session: { ...h.session, attachments: { upload: vi.fn() } } });
-    pasteText(h.input(), "x".repeat(16001));
+    // A paste below the large-paste limit stays text and overflows the draft.
+    h.fill("y".repeat(7000));
+    pasteText(h.input(), "x".repeat(9001));
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Shorten it or attach the text as a file.",
     );
@@ -16654,4 +16656,162 @@ it("shows an annotator's marks in the composer and retires them with the destina
   await waitFor(() =>
     expect(h.input().querySelector('[aria-invalid="spelling"]')).toBeNull(),
   );
+});
+
+describe("large text paste", () => {
+  const pasteText = (input: HTMLElement, text: string, plain = false) => {
+    act(() => {
+      input.focus();
+      if (plain)
+        fireEvent.keyDown(input, {
+          key: "V",
+          code: "KeyV",
+          ctrlKey: true,
+          shiftKey: true,
+        });
+      fireEvent.paste(input, {
+        clipboardData: {
+          items: [],
+          getData: (type: string) => (type === "text/plain" ? text : ""),
+        },
+      });
+    });
+  };
+  const chips = (form: HTMLElement) =>
+    within(form).queryAllByText(/^pasted-text-.*\.txt$/);
+  const log = Array.from({ length: 300 }, (_, i) => `log line ${i}`).join("\n");
+
+  const notice = () =>
+    screen.queryByRole("dialog", { name: "Pasted as a text file" });
+
+  it("attaches a large paste as a text file that uploads only on Send", async () => {
+    const h = await mountUploadComposer();
+    pasteText(h.input(), log);
+    await waitFor(() => expect(chips(h.form())).toHaveLength(1));
+    expect(h.input()).toHaveValue("");
+    expect(h.form()).toHaveTextContent("Uploads when sent");
+    expect(
+      await screen.findByRole("dialog", { name: "Pasted as a text file" }),
+    ).toBeVisible();
+    // Nothing leaves the device until Send.
+    await act(async () => {});
+    expect(h.uploadCalls).toHaveLength(0);
+    fireEvent.click(h.send());
+    await waitFor(() => expect(h.uploadCalls).toHaveLength(1));
+    const file = h.uploadCalls[0]?.file;
+    expect(file?.type).toBe("text/plain");
+    expect(await file?.text()).toBe(log);
+    await act(async () =>
+      h.uploadCalls[0]?.result.resolve(uploadDescriptor(file?.name)),
+    );
+    await waitFor(() => expect(h.publish).toHaveBeenCalledOnce());
+    // The offer leaves with its file, so a late click cannot paste anywhere.
+    await waitFor(() => expect(notice()).toBeNull());
+  });
+
+  it("pastes a plain-text paste inline, however large", async () => {
+    const h = await mountUploadComposer();
+    pasteText(h.input(), log, true);
+    expect(h.input()).toHaveValue(log);
+    expect(chips(h.form())).toHaveLength(0);
+    await act(async () => {});
+    expect(notice()).toBeNull();
+  });
+
+  it("pastes inline without an error when the attachment is refused", async () => {
+    const h = await mountUploadComposer();
+    pickAttachments(
+      h.container,
+      Array.from({ length: 10 }, (_, i) => attachmentFile(`f${i}.txt`)),
+    );
+    await waitFor(() => expect(h.uploadCalls).toHaveLength(1));
+    pasteText(h.input(), log);
+    expect(h.input()).toHaveValue(log);
+    expect(chips(h.form())).toHaveLength(0);
+    await act(async () => {});
+    expect(screen.queryByText("Could not attach file")).toBeNull();
+    expect(notice()).toBeNull();
+  });
+
+  it("pastes text at the limit inline", async () => {
+    const h = await mountUploadComposer();
+    const text = Array.from({ length: 200 }, (_, i) => `l${i}`).join("\n");
+    pasteText(h.input(), text);
+    expect(h.input()).toHaveValue(text);
+    expect(chips(h.form())).toHaveLength(0);
+    expect(
+      screen.queryByRole("dialog", { name: "Pasted as a text file" }),
+    ).toBeNull();
+  });
+
+  it("keeps a large paste as text while editing a sent message", async () => {
+    const h = await mountUploadComposer({ editable: true });
+    h.unmount();
+    const row = editableMessage({ authorId: h.owner.session.viewer ?? "" });
+    const again = render(
+      <MessageComposer
+        session={h.owner.session}
+        scope={h.scope}
+        channelId="channel"
+        channelName="General"
+        editMessages={[row]}
+      />,
+      { wrapper: ToastProvider },
+    );
+    const editor = within(again.container).getByRole("textbox");
+    fireEvent.keyDown(editor, { key: "ArrowUp" });
+    expect(editor).toHaveAccessibleName("Edit message");
+    pasteText(editor, "x".repeat(10001));
+    expect(editor).toHaveValue(`Original message${"x".repeat(10001)}`);
+    expect(h.uploadCalls).toHaveLength(0);
+    // Let any notice the paste raised reach the toaster before asserting none.
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("pastes the text inline instead and removes the file", async () => {
+    const h = await mountUploadComposer();
+    pasteText(h.input(), log);
+    await waitFor(() => expect(chips(h.form())).toHaveLength(1));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Paste inline instead" }),
+    );
+    expect(h.input()).toHaveValue(log);
+    await waitFor(() => expect(chips(h.form())).toHaveLength(0));
+    expect(h.uploadCalls).toHaveLength(0);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Pasted as a text file" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("keeps the file when the text is too long to paste inline", async () => {
+    const h = await mountUploadComposer();
+    pasteText(h.input(), "x".repeat(16001));
+    await waitFor(() => expect(chips(h.form())).toHaveLength(1));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Paste inline instead" }),
+    );
+    expect(h.input()).toHaveValue("");
+    expect(chips(h.form())).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This paste would make your message too long.",
+    );
+  });
+
+  it("closes the offer once the draft changes", async () => {
+    const h = await mountUploadComposer();
+    pasteText(h.input(), log);
+    expect(
+      await screen.findByRole("dialog", { name: "Pasted as a text file" }),
+    ).toBeVisible();
+    await userEvent.type(h.input(), "caption");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Pasted as a text file" }),
+      ).toBeNull(),
+    );
+    expect(chips(h.form())).toHaveLength(1);
+  });
 });

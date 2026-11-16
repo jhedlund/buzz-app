@@ -262,18 +262,22 @@ function AttachmentItem({
       ? `${Math.max(1, Math.round(bytes / 1024))} KB`
       : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   const uploadFailed = item.status === "error";
-  const status = {
-    queued: "Queued",
-    preparing: "Preparing…",
-    uploading: "Uploading…",
-    ready: "Ready",
-    error: "Upload failed",
-  }[item.status];
+  const held = item.status === "queued" && item.onSend;
+  const status = held
+    ? "Uploads when sent"
+    : {
+        queued: "Queued",
+        preparing: "Preparing…",
+        uploading: "Uploading…",
+        ready: "Ready",
+        error: "Upload failed",
+      }[item.status];
   // Preparation has no byte total; transfer progress comes from the host.
   const busy =
-    item.status === "queued" ||
-    item.status === "preparing" ||
-    item.status === "uploading";
+    !held &&
+    (item.status === "queued" ||
+      item.status === "preparing" ||
+      item.status === "uploading");
   if (item.voice && source && renderers)
     return (
       <motion.li {...appearance} className={styles.voiceItem} data-voice-draft>
