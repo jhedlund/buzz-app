@@ -244,6 +244,43 @@ describe("reads", () => {
     ]);
   });
 
+  it("reads again a root whose newest second a full page cut, to complete its frontier", async () => {
+    const busy = ROOT;
+    const quiet = "b".repeat(64);
+    const titles = [busy, quiet].map((root) => ({
+      channel: CHANNEL,
+      root,
+    })) as ThreadTitle[];
+    const read = vi.fn(async (filters: readonly ReadFilter[]) => {
+      const roots = filters[0]?.["#e"] ?? [];
+      // The page ends inside the quiet root's newest second.
+      if (roots.includes(busy))
+        return [
+          ...Array.from({ length: 499 }, (_, i) =>
+            reply(`b${i}`, CHANNEL, busy, 1000 - i),
+          ),
+          reply("q1", CHANNEL, quiet, 501),
+        ];
+      return [
+        reply("q2", CHANNEL, quiet, 501),
+        reply("q1", CHANNEL, quiet, 501),
+      ];
+    });
+    const ids = new Map<string, ReadonlySet<string>>();
+    const latest = await readActivity(
+      { read },
+      titles,
+      new AbortController().signal,
+      ids,
+    );
+    expect(latest.get(activityKey(CHANNEL, quiet))).toBe(501);
+    expect([...(ids.get(activityKey(CHANNEL, quiet)) ?? [])].sort()).toEqual([
+      "q1",
+      "q2",
+    ]);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it("reads at most four channels at once, and one held read blocks none of the others", async () => {
     const channels = Array.from(
       { length: 6 },

@@ -6,11 +6,18 @@ import type { RelayData } from "../../features/relay/service";
 import type { RelaySession } from "../../features/relay/session";
 import {
   ArrowsClockwiseIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  CheckCircleFilledIcon,
+  CheckCircleIcon,
   ChecksIcon,
   MessageReplyIcon,
   PencilSimpleIcon,
+  PinFilledIcon,
+  PinIcon,
   XIcon,
 } from "../../shared/design-system/icons";
+import { Button } from "../../shared/design-system/ui/Button";
 import { CountBadge } from "../../shared/design-system/ui/CountBadge";
 import { TypingDots } from "../../shared/design-system/ui/TypingDots";
 import { EmptyState } from "../../shared/design-system/ui/EmptyState";
@@ -43,9 +50,24 @@ import {
   writeTitle,
 } from "../../features/messages/thread-titles";
 import styles from "./Threads.module.css";
+import {
+  encodeMarks,
+  isDone,
+  MARK_COORDINATE,
+  type MarkKind,
+  type Marks,
+  parseMarks,
+  setMark,
+} from "./thread-marks";
 import { useThreadSignals, workingDuration } from "./thread-signals";
 
 const ALL = "";
+type MarkChange = Readonly<{
+  kind: MarkKind;
+  root: string;
+  on: boolean;
+  at: number;
+}>;
 
 export function ThreadsPage({
   relay,
@@ -172,9 +194,112 @@ export function ThreadsView({
   const error = saveError ?? shared.error;
   const toolbar = useRef<HTMLDivElement>(null);
 
+  // Pins and done marks are private records only the desktop host can read
+  // and write; without it the page shows neither. Read on open and Refresh.
+  const readMarks = session.readThreadMarks;
+  const writeMarks = session.writeThreadMarks;
+  // What the relay last said, and the changes not yet saved: the page shows
+  // the saved marks with every pending change applied, so a read or a
+  // write's result never hides a change still in the queue.
+  const [saved, setSaved] = useState<
+    Readonly<{ pins: Marks; done: Marks }> | undefined
+  >();
+  const [pending, setPending] = useState<readonly MarkChange[]>([]);
+  const marks = useMemo(() => {
+    if (!saved) return undefined;
+    let shown = saved;
+    for (const change of pending)
+      shown = {
+        ...shown,
+        [change.kind]: setMark(
+          shown[change.kind],
+          change.root,
+          change.on,
+          change.at,
+        ),
+      };
+    return shown;
+  }, [saved, pending]);
+  const [showDone, setShowDone] = useState(false);
+  const [marksGeneration, setMarksGeneration] = useState(0);
+  // Reads and writes of the marks run one at a time, so a read never lands
+  // after a later write it doesn't include.
+  const marksQueue = useRef(Promise.resolve());
+  const readSaved = useCallback(
+    async (signal: AbortSignal) => {
+      if (!readMarks) return;
+      const [pins, done] = await Promise.all(
+        (["pins", "done"] as const).map(async (kind) =>
+          parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
+        ),
+      );
+      if (pins && done && !signal.aborted) setSaved({ pins, done });
+    },
+    [readMarks],
+  );
+  useEffect(() => {
+    void marksGeneration;
+    if (!readMarks) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    marksQueue.current = marksQueue.current.then(() =>
+      readSaved(AbortSignal.any([signal, AbortSignal.timeout(20_000)])).catch(
+        (cause) => {
+          if (!signal.aborted)
+            setSaveError(
+              cause instanceof Error ? cause.message : String(cause),
+            );
+        },
+      ),
+    );
+    return () => controller.abort();
+  }, [readMarks, readSaved, marksGeneration]);
+  // A mark shows at once. Each write reads the latest record and changes one
+  // root (an unreadable record aborts before anything is written); its
+  // result becomes the saved marks. A failed write drops its own change and
+  // reads the saved marks again, still in turn.
+  const mark = useCallback(
+    (kind: MarkKind, root: string, on: boolean) => {
+      if (!writeMarks) return;
+      setSaveError(undefined);
+      const change: MarkChange = { kind, root, on, at: Date.now() };
+      setPending((current) => [...current, change]);
+      const settle = () =>
+        setPending((current) => current.filter((c) => c !== change));
+      marksQueue.current = marksQueue.current.then(async () => {
+        try {
+          const result = parseMarks(
+            kind,
+            await writeMarks(
+              MARK_COORDINATE[kind],
+              (current) =>
+                encodeMarks(
+                  kind,
+                  setMark(parseMarks(kind, current), root, on, Date.now()),
+                ),
+              AbortSignal.timeout(20_000),
+            ),
+          );
+          setSaved((current) => current && { ...current, [kind]: result });
+          settle();
+          if (!!result.get(root)?.on !== on)
+            throw new Error(
+              "That changed on another device. Refresh and try again.",
+            );
+        } catch (cause) {
+          settle();
+          setSaveError(cause instanceof Error ? cause.message : String(cause));
+          await readSaved(AbortSignal.timeout(20_000)).catch(() => {});
+        }
+      });
+    },
+    [writeMarks, readSaved],
+  );
+
   const refresh = () => {
     setSaveError(undefined);
     threadActivityStore(session).refresh();
+    setMarksGeneration((g) => g + 1);
   };
 
   const rows = useMemo(
@@ -278,7 +403,22 @@ export function ThreadsView({
       setSaveError(cause instanceof Error ? cause.message : String(cause));
     }
   };
+  // Unread replies also reopen a done thread, as in Buzz 0.x: a view rule
+  // only, the saved mark is untouched.
+  const done = (row: Row) => {
+    const frontier = activity.get(activityKey(row.channel, row.root));
+    return (
+      !unreadOf(row) &&
+      isDone(
+        marks?.done.get(row.root),
+        row.activeAt,
+        frontier?.at === row.activeAt ? frontier.ids : [],
+      )
+    );
+  };
   const renderRow = (row: Row) => {
+    const isPinned = !!marks?.pins.get(row.root)?.on;
+    const isDoneRow = done(row);
     const unread = unreadOf(row);
     const work = signals.working.get(activityKey(row.channel, row.root));
     return (
@@ -346,8 +486,9 @@ export function ThreadsView({
                 })
               }
             />
-            {(writer || unread > 0) && (
-              // Actions show on hover or keyboard focus.
+            {(writer || marks || unread > 0) && (
+              // Pin is last, Done before it, as in Buzz 0.x. Actions show on
+              // hover or keyboard focus; a set pin or done mark stays shown.
               <span className={styles.actions}>
                 {writer && (
                   <span data-reveal="">
@@ -372,6 +513,42 @@ export function ThreadsView({
                     />
                   </span>
                 )}
+                {marks && (
+                  <>
+                    <span data-reveal={isDoneRow ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isDoneRow ? (
+                            <CheckCircleFilledIcon size={16} />
+                          ) : (
+                            <CheckCircleIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isDoneRow ? "Reopen" : "Mark done"} ${row.title}`}
+                        aria-pressed={isDoneRow}
+                        title={isDoneRow ? "Reopen" : "Mark done"}
+                        onClick={() => mark("done", row.root, !isDoneRow)}
+                      />
+                    </span>
+                    <span data-reveal={isPinned ? undefined : ""}>
+                      <IconButton
+                        variant="bare"
+                        icon={
+                          isPinned ? (
+                            <PinFilledIcon size={16} />
+                          ) : (
+                            <PinIcon size={16} />
+                          )
+                        }
+                        aria-label={`${isPinned ? "Unpin" : "Pin"} ${row.title}`}
+                        aria-pressed={isPinned}
+                        title={isPinned ? "Unpin" : "Pin"}
+                        onClick={() => mark("pins", row.root, !isPinned)}
+                      />
+                    </span>
+                  </>
+                )}
               </span>
             )}
           </NavigationCard>
@@ -379,6 +556,11 @@ export function ThreadsView({
       </li>
     );
   };
+  const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
+  const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
+  // Pinned wins over done for placement: a pinned done thread stays pinned.
+  const finished = unpinned.filter((r) => done(r));
+  const active = unpinned.filter((r) => !finished.includes(r));
 
   return (
     <div data-buzz-ui="" className={styles.page}>
@@ -443,9 +625,38 @@ export function ThreadsView({
                   }
                 />
               ) : (
-                <ul className={styles.list} aria-label="Named threads">
-                  {sorted.map(renderRow)}
-                </ul>
+                <>
+                  {pinned.length > 0 && (
+                    <ul className={styles.list} aria-label="Pinned threads">
+                      {pinned.map(renderRow)}
+                    </ul>
+                  )}
+                  <ul className={styles.list} aria-label="Named threads">
+                    {active.map(renderRow)}
+                  </ul>
+                  {finished.length > 0 && (
+                    <section aria-label="Done threads">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-expanded={showDone}
+                        onClick={() => setShowDone((shown) => !shown)}
+                      >
+                        {showDone ? (
+                          <CaretDownIcon size="1rem" aria-hidden="true" />
+                        ) : (
+                          <CaretRightIcon size="1rem" aria-hidden="true" />
+                        )}
+                        Done ({finished.length})
+                      </Button>
+                      {showDone && (
+                        <ul className={styles.list} aria-label="Done threads">
+                          {finished.map(renderRow)}
+                        </ul>
+                      )}
+                    </section>
+                  )}
+                </>
               )}
               {shared.partial && (
                 <p className={`text-caption text-subtle ${styles.notice}`}>

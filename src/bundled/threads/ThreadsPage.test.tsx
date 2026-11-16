@@ -67,12 +67,15 @@ async function fixture({
   writable = true,
   hold,
   holdActivity,
+  marks,
 }: {
   empty?: boolean;
   writable?: boolean;
   hold?: Promise<void>;
   /** Holds every reply read open until it resolves. */
   holdActivity?: Promise<void>;
+  /** Private pin and done records by coordinate; omitted: no host for them. */
+  marks?: Record<string, unknown>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   // The relay's current heads and stored replies; a test changes them as the
@@ -129,6 +132,17 @@ async function fixture({
     replay?: boolean | undefined;
     followed?: readonly string[];
   } = {};
+  const records = marks;
+  const writeThreadMarks = vi.fn(
+    async (
+      coordinate: string,
+      update: (current: unknown) => Record<string, unknown>,
+    ) => {
+      if (!records) throw new Error("no host");
+      records[coordinate] = update(records[coordinate]);
+      return records[coordinate];
+    },
+  );
   // Thread unread and agent activity, as the session projects them.
   const signals = {
     unread: new Map<string, { rootId: string; unreadCount: number }[]>(),
@@ -153,6 +167,9 @@ async function fixture({
       return { status: "saved" };
     },
   );
+  const readThreadMarks = vi.fn(async (coordinate: string) =>
+    records ? records[coordinate] : undefined,
+  );
   const session = {
     unread: {
       activity: (channelId: string) => ({
@@ -175,6 +192,10 @@ async function fixture({
         return () => signals.listeners.delete(listener);
       },
     },
+    ...(records && {
+      readThreadMarks,
+      writeThreadMarks,
+    }),
     artifacts: {
       follow: vi.fn((ids: readonly string[], listener: typeof live.titles) => {
         live.followed = ids;
@@ -229,6 +250,8 @@ async function fixture({
     relay,
     view,
     mount,
+    writeThreadMarks,
+    readThreadMarks,
     signals,
     prepareThreadRead,
   };
@@ -612,6 +635,151 @@ it("reads a restored thread's replies again, even when its successor is older", 
 
 const A = "a".repeat(64);
 const B = "b".repeat(64);
+const C = "c".repeat(64);
+const list = async (name: string) =>
+  within(await screen.findByRole("list", { name }))
+    .queryAllByRole("listitem")
+    .map((item) => item.textContent?.split("·")[0]?.trim());
+
+it("shows pinned threads first and done ones collapsed, a pinned done one staying pinned", async () => {
+  const later = Date.now() + 60_000;
+  await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: {
+          [B]: { pinned: true, updatedAt: 1 },
+          [C]: { pinned: false, updatedAt: 1 },
+        },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  await waitFor(async () =>
+    expect(await list("Named threads")).toEqual(["Launch planalpha"]),
+  );
+  expect(
+    screen.getByRole("button", { name: "Reopen Bug triage" }),
+  ).toBeInTheDocument();
+  const toggle = screen.getByRole("button", { name: "Done (1)" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(toggle);
+  expect(await list("Done threads")).toEqual(["Retro notesalpha"]);
+});
+
+it("pins and marks done by changing one root of the latest record", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+    },
+  });
+  await screen.findByRole("list", { name: "Pinned threads" });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await waitFor(async () =>
+    expect(await list("Pinned threads")).toEqual([
+      "Launch planalpha",
+      "Retro notesalpha",
+    ]),
+  );
+  const [coordinate, update] = f.writeThreadMarks.mock.calls[0] ?? [];
+  expect(coordinate).toBe("thread-pins");
+  expect(update?.(undefined)).toMatchObject({
+    version: 1,
+    roots: { [A]: { pinned: true } },
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark done Bug triage" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  expect(f.writeThreadMarks.mock.calls[1]?.[0]).toBe("thread-done");
+});
+
+it("reopens a done thread once it has newer activity", async () => {
+  // Marked done before Launch plan's reply at now - 10.
+  const before = (Math.floor(Date.now() / 1000) - 100) * 1000;
+  await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: { [A]: { done: true, updatedAt: before } },
+      },
+    },
+  });
+  await waitFor(async () => expect((await rows())[0]).toBe("Launch planalpha"));
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("writes nothing over a record it can't read", async () => {
+  const f = await fixture({
+    marks: { "thread-pins": { version: 7 } },
+  });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "couldn't be read",
+  );
+  expect(
+    screen.queryByRole("button", { name: "Pin Launch plan" }),
+  ).not.toBeInTheDocument();
+  expect(f.writeThreadMarks).not.toHaveBeenCalled();
+});
+
+it("offers no pin or done without the host's private records", async () => {
+  await fixture();
+  await rows();
+  expect(
+    screen.queryByRole("button", { name: /^Pin / }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /^Mark done / }),
+  ).not.toBeInTheDocument();
+});
+
+it("reopens a 0.x done mark when a reply its frontier doesn't list lands in its second", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-done": {
+        version: 1,
+        roots: {
+          [A]: {
+            done: true,
+            updatedAt: 1,
+            activityAt: Math.floor(Date.now() / 1000) - 10,
+            activityIds: ["r1"],
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => f.live.events?.({ events: [reply("r2", ALPHA, A, f.now - 10)] }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: /^Done/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect((await rows())[0]).toBe("Launch planalpha");
+});
 
 it("shows unread replies on a row, and Mark read clears them", async () => {
   const f = await fixture();
@@ -635,6 +803,42 @@ it("shows unread replies on a row, and Mark read clears them", async () => {
   expect(
     screen.queryByRole("button", { name: "Mark Bug triage read" }),
   ).not.toBeInTheDocument();
+});
+
+it("keeps a done thread with unread replies under Threads, and a pinned one pinned", async () => {
+  const later = Date.now() + 60_000;
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [C]: { pinned: true, updatedAt: 1 } },
+      },
+      "thread-done": {
+        version: 1,
+        roots: {
+          [B]: { done: true, updatedAt: later },
+          [C]: { done: true, updatedAt: later },
+        },
+      },
+    },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Done (1)" }),
+    ).toBeInTheDocument(),
+  );
+  act(() => {
+    f.signals.unread.set(BETA, [{ rootId: B, unreadCount: 1 }]);
+    f.signals.unread.set(ALPHA, [{ rootId: C, unreadCount: 1 }]);
+    f.signals.emit();
+  });
+  await waitFor(async () =>
+    expect(await list("Named threads")).toContain("Bug triagebeta"),
+  );
+  expect(
+    screen.queryByRole("button", { name: /^Done/ }),
+  ).not.toBeInTheDocument();
+  expect(await list("Pinned threads")).toEqual(["Retro notesalpha"]);
 });
 
 it("shows how long agents have been working in a thread, then clears it", async () => {
@@ -717,27 +921,107 @@ it("loads a thread root unread state hasn't seen before marking the thread read"
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-it("orders row actions Rename, Mark read and reveals them on hover or focus", async () => {
-  const f = await fixture();
+it("moves a row as soon as it is marked, and re-reads the saved marks if the save fails", async () => {
+  const f = await fixture({ marks: {} });
   await rows();
+  await screen.findByRole("button", { name: "Pin Launch plan" });
+  let fail = (_: Error) => {};
+  f.writeThreadMarks.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Mark done Bug triage" }),
+  );
+  // Shown before the relay answers.
+  expect(screen.getByRole("button", { name: "Done (1)" })).toBeInTheDocument();
+  expect(f.writeThreadMarks).toHaveBeenCalledTimes(1);
+  act(() => fail(new Error("Relay offline")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Relay offline");
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: /^Done/ }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
+it("orders row actions Rename, Mark read, Done, Pin and keeps a set pin or done mark shown", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [A]: { pinned: true, updatedAt: 1 } },
+      },
+    },
+  });
   act(() => {
     f.signals.unread.set(ALPHA, [{ rootId: A, unreadCount: 1 }]);
     f.signals.emit();
   });
-  const read = await screen.findByRole("button", {
-    name: "Mark Launch plan read",
-  });
-  const row = read.closest("li") as HTMLElement;
+  const pin = await screen.findByRole("button", { name: "Unpin Launch plan" });
+  const row = pin.closest("li") as HTMLElement;
   expect(
     within(row)
       .getAllByRole("button")
       .slice(1)
       .map((button) => button.getAttribute("aria-label")),
-  ).toEqual(["Rename Launch plan", "Mark Launch plan read"]);
+  ).toEqual([
+    "Rename Launch plan",
+    "Mark Launch plan read",
+    "Mark done Launch plan",
+    "Unpin Launch plan",
+  ]);
   const reveal = (name: string) =>
     within(row)
       .getByRole("button", { name })
       .parentElement?.hasAttribute("data-reveal");
-  expect(reveal("Mark Launch plan read")).toBe(true);
+  expect(reveal("Unpin Launch plan")).toBe(false);
+  expect(reveal("Mark done Launch plan")).toBe(true);
   expect(reveal("Rename Launch plan")).toBe(true);
+});
+
+it("keeps a later pin when an earlier one fails, however slow its recovery read", async () => {
+  const f = await fixture({ marks: {} });
+  await screen.findByRole("button", { name: "Pin Launch plan" });
+  const held = () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release };
+  };
+  const failing = held();
+  const recovery = held();
+  f.writeThreadMarks.mockImplementationOnce(async () => {
+    await failing.gate;
+    throw new Error("Relay offline");
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Pin Bug triage" }));
+  expect(await list("Pinned threads")).toEqual([
+    "Launch planalpha",
+    "Bug triagebeta",
+  ]);
+  // The recovery read, taken before the second save, answers no pins and
+  // is held; the second save waits for it rather than racing it.
+  const read = f.readThreadMarks.getMockImplementation();
+  f.readThreadMarks.mockImplementation(async (...args) => {
+    const answer = await read?.(...args);
+    await recovery.gate;
+    return answer;
+  });
+  failing.release();
+  await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+  expect(f.writeThreadMarks).toHaveBeenCalledTimes(1);
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  recovery.release();
+  await waitFor(() => expect(f.writeThreadMarks).toHaveBeenCalledTimes(2));
+  await waitFor(async () =>
+    expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("Relay offline");
 });

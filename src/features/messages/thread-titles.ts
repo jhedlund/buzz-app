@@ -105,13 +105,15 @@ export async function staleChannels(
 }
 
 /** Records reply times in place: a root of a titled row (`titled`, keyed by
- * activityKey) keeps its newest reply in `latest`. Order-independent.
- * Returns whether a titled row's time advanced. */
+ * activityKey) keeps its newest reply in `latest`, and when given, the ids
+ * of the replies in that second in `ids` (Buzz 0.x's activity frontier).
+ * Order-independent. Returns whether a titled row's frontier changed. */
 export function noteReplies(
   events: readonly EventData[],
   channels: ReadonlySet<string>,
   titled: ReadonlySet<string>,
   latest: Map<string, number>,
+  ids?: Map<string, ReadonlySet<string>>,
 ) {
   let advanced = false;
   for (const event of events) {
@@ -123,9 +125,15 @@ export function noteReplies(
       const key = activityKey(channel, value);
       const at = event.created_at;
       const was = latest.get(key) ?? 0;
-      if (!titled.has(key) || at <= was) continue;
-      latest.set(key, at);
-      advanced = true;
+      if (!titled.has(key) || at < was) continue;
+      if (at > was) {
+        latest.set(key, at);
+        ids?.set(key, new Set([event.id]));
+        advanced = true;
+      } else if (ids && !ids.get(key)?.has(event.id)) {
+        ids.set(key, new Set([...(ids.get(key) ?? []), event.id]));
+        advanced = true;
+      }
     }
   }
   return advanced;
@@ -228,6 +236,8 @@ export async function readActivity(
   session: Pick<RelaySession, "read">,
   titles: readonly ThreadTitle[],
   signal: AbortSignal,
+  /** Filled with each root's newest-second reply ids, when given. */
+  ids?: Map<string, ReadonlySet<string>>,
 ) {
   const latest = new Map<string, number>();
   const roots = new Map<string, string[]>();
@@ -251,14 +261,19 @@ export async function readActivity(
         new Set([channel]),
         new Set(batch.map((root) => activityKey(channel, root))),
         latest,
+        ids,
       );
       // The limit is shared by the batch: a full page may have cut off every
       // reply of a quieter root. Those roots are read again on their own;
-      // each full page names at least one root, so the batch shrinks.
+      // each full page names at least one root, so the batch shrinks. With
+      // ids, a root whose newest second is the page's last may be missing
+      // some of that second's replies, so it is read again too.
       if (replies.length >= PAGE) {
-        const unseen = batch.filter(
-          (root) => !latest.has(activityKey(channel, root)),
-        );
+        const last = Math.min(...replies.map((r) => r.created_at));
+        const unseen = batch.filter((root) => {
+          const at = latest.get(activityKey(channel, root));
+          return at === undefined || (!!ids && at === last);
+        });
         if (unseen.length && unseen.length < batch.length)
           batches.push([channel, unseen]);
       }
