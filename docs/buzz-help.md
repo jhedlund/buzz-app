@@ -537,7 +537,8 @@ and are asked to sign in again in Buzz.
   its first message in the channel (choose it to open the thread) and on its thread tab. Renaming a thread
   tab sets the shared title; if that can't be saved, the name stays on that tab on this device only.
   Agents and the `buzz threads title` CLI also set titles, and Buzz 0.x shows the same titles; they are not
-  searchable. Provided by the optional Named threads plugin, on by default.
+  searchable. When you start a thread by mentioning agents, the first one you mention gives it a title if it
+  has none; agents never rename a titled thread. Provided by the optional Named threads plugin, on by default.
 - **New messages** marks the first known unread incoming channel message when
   you enter. Once established, the divider stays in place for that visit as you
   read, reveal another message, or receive new messages. In a channel with more
