@@ -16,12 +16,28 @@
 #                                  while the sign-in still names it
 set -eu
 
+SHARED_HOME="Buzz's Codex shares your Codex home: Windows makes links only in Developer Mode"
+
 # Shared by every Buzz build on this computer, so there is one download.
 if [ "$(uname)" = Darwin ]; then
   dir="$HOME/Library/Application Support/Buzz/codex" nofollow=-h physical=-P
 else
   dir="${XDG_DATA_HOME:-$HOME/.local/share}/buzz/codex" nofollow='' physical=''
 fi
+# Windows releases are `.exe`. Git for Windows' `ln -s` copies unless told to
+# make a real link, which needs Developer Mode; then it fails instead.
+exe=""
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*)
+  exe=.exe
+  export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict"
+  ;;
+esac
+# Makes folders only their owner can open, as `mkdir -p -m 700` would; Git for
+# Windows' `mkdir -m` fails setting the mode, while a umask works everywhere.
+private_folders() {
+  mkdir -p "${dir%/*}"
+  (umask 077 && mkdir -p "$@")
+}
 # Versions name folders, so only digits and dots: no `..` or `/` escapes.
 valid() {
   case "$1" in "" | [!0-9]* | *[!0-9.]*) return 1 ;; esac
@@ -65,7 +81,7 @@ shift
 case "$command" in run | adopt | home | login | review)
   mkdir -p "${CODEX_HOME:-$HOME/.codex}"
   shared=$(cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P)
-  mkdir -p -m 700 "$dir-home"
+  private_folders "$dir-home"
   home=$(cd "$dir-home" && pwd -P)
   # A desktop build launched by a Buzz agent inherits this isolated home.
   # Recover its original shared home from our existing absolute config link,
@@ -101,12 +117,21 @@ case "$command" in run | adopt | home | login | review)
     fi
     exec 9>&-
   fi
-  for name in config.toml auth.json AGENTS.md rules skills; do
-    [ -e "$home/$name" ] || [ -L "$home/$name" ] ||
-      ln -sn "$shared/$name" "$home/$name" 2>/dev/null || true
-    [ "$(readlink "$home/$name")" = "$shared/$name" ] ||
-      { echo "Buzz's Codex setup conflicts with $home/$name" >&2; exit 1; }
-  done
+  # Without real links (Windows without Developer Mode), Codex runs in the
+  # shared home itself, and says so: the plugin tells the person.
+  probe="$home/.link.$$"
+  if [ -n "$exe" ] && [ ! -L "$home/config.toml" ] &&
+    ! { ln -sn "$shared/config.toml" "$probe" 2>/dev/null && rm -f "$probe"; }; then
+    echo "$SHARED_HOME" >&2
+    home="$shared"
+  else
+    for name in config.toml auth.json AGENTS.md rules skills; do
+      [ -e "$home/$name" ] || [ -L "$home/$name" ] ||
+        ln -sn "$shared/$name" "$home/$name" 2>/dev/null || true
+      [ "$(readlink "$home/$name")" = "$shared/$name" ] ||
+        { echo "Buzz's Codex setup conflicts with $home/$name" >&2; exit 1; }
+    done
+  fi
   export CODEX_HOME="$home"
   ;;
 esac
@@ -123,7 +148,7 @@ run)
     version="${BUZZ_CODEX_VERSION:-$(cat "$dir/current" 2>/dev/null)}"
     # 127, as for a missing program: the plugin reads it as "not installed".
     valid "$version" || { echo "Codex is not installed" >&2; exit 127; }
-    exec "$dir/$version/bin/codex" "$@"
+    exec "$dir/$version/bin/codex$exe" "$@"
     # Builds that switched after the read above may have pruned its release;
     # then start the one `current` names now.
     [ -z "${BUZZ_CODEX_VERSION:-}" ] &&
@@ -135,7 +160,8 @@ install)
   valid "$version" || { echo "Invalid version" >&2; exit 2; }
   case "$target" in
   aarch64-apple-darwin | x86_64-apple-darwin | \
-    aarch64-unknown-linux-musl | x86_64-unknown-linux-musl) ;;
+    aarch64-unknown-linux-musl | x86_64-unknown-linux-musl | \
+    aarch64-pc-windows-msvc | x86_64-pc-windows-msvc) ;;
   *) echo "Unsupported platform" >&2; exit 2 ;;
   esac
   # Each download unpacks in its own hidden folder, so two Buzz builds
@@ -153,7 +179,7 @@ install)
     sha256sum "$part/package.tar.gz") | cut -d" " -f1)
   [ "$actual" = "$checksum" ] || { echo "The download did not match its checksum" >&2; exit 1; }
   tar -xzf "$part/package.tar.gz" -C "$part/package"
-  test -x "$part/package/bin/codex"
+  test -x "$part/package/bin/codex$exe"
   # A rename, so a session starting now sees no folder or the whole release.
   # Another build that already installed this release keeps its folder.
   [ -d "$dir/$version" ] || mv "$part/package" "$dir/$version"
@@ -165,7 +191,7 @@ use)
   # another just switched to.
   lock "$dir/.lock"
   # Checked under the lock: another build may have pruned it meanwhile.
-  test -x "$dir/$version/bin/codex" ||
+  test -x "$dir/$version/bin/codex$exe" ||
     { echo "Codex $version is no longer downloaded" >&2; exit 1; }
   previous=$(cat "$dir/current" 2>/dev/null || true)
   printf %s "$version" >"$dir/current.$$"
@@ -208,13 +234,21 @@ home)
   printf '%s\n' "$home"
   ;;
 login | review)
+  # Shared, there is no review home: Codex signs in where it runs.
+  if [ "$home" = "$shared" ]; then
+    [ "$command" = login ] ||
+      { echo "Codex security reviews need Developer Mode on Windows" >&2; exit 2; }
+    version="${BUZZ_CODEX_VERSION:-$(cat "$dir/current" 2>/dev/null)}"
+    valid "$version" || { echo "Codex is not installed" >&2; exit 127; }
+    exec "$dir/$version/bin/codex$exe" login
+  fi
   # The security plugin keeps this home read-only to every contained worker, so
   # nothing one writes (config.toml, AGENTS.md, skills, memories, rules) can
   # reach a review: it holds only the sign-in, the workspace a Buzz sign-in
   # recorded, and the names Codex must write at startup, linked to a state
   # folder. Shared with the plugin, by path. Anything else, such as a file
   # planted before the plugin protected it, is removed.
-  mkdir -p -m 700 "$dir-review-state" "$dir-review-home"
+  private_folders "$dir-review-state" "$dir-review-home"
   state=$(cd "$dir-review-state" && pwd -P)
   review=$(cd "$dir-review-home" && pwd -P)
   # So a review never relinks a sign-in still being made here.
@@ -239,14 +273,14 @@ login | review)
       "$shared/config.toml" 2>/dev/null; then
       rm -f "$review/workspace"
       echo "Codex security reviews can't use a sign-in kept in the keyring." >&2
-      exec "$dir/$version/bin/codex" -c "sqlite_home=$home" login 9>&-
+      exec "$dir/$version/bin/codex$exe" -c "sqlite_home=$home" login 9>&-
     fi
     # Codex signs out first, revoking the sign-in it finds, so it must not find
     # the shared one: a cancelled sign-in would sign Codex out everywhere. The
     # new sign-in is written here, where no contained worker can change it
     # before its workspace is read. The browser it opens must not keep the lock.
     rm -f "$review/auth.json"
-    CODEX_HOME="$review" "$dir/$version/bin/codex" login 9>&-
+    CODEX_HOME="$review" "$dir/$version/bin/codex$exe" login 9>&-
     [ -s "$review/auth.json" ] && [ ! -L "$review/auth.json" ] ||
       { echo "Codex did not save a sign-in" >&2; exit 1; }
     if workspace=$(chatgpt_workspace "$review/auth.json"); then

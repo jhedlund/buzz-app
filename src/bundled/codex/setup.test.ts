@@ -11,6 +11,7 @@ import {
   CodexSetup,
   explainTurn,
   reviewHome,
+  targetOf,
   withScript,
 } from "./setup";
 import manifest from "./manifest.json";
@@ -100,6 +101,53 @@ function scripted(output: Record<string, Partial<Result>>, account?: Account) {
   };
   return { spawn, calls };
 }
+
+it("starts codex.sh from the environment and names the workspace as Windows does, on Windows", async () => {
+  const { spawn, calls } = scripted({});
+  const run = withScript(spawn, true);
+  await run("app-server");
+  await run("workspace", { cwd: "~/work" });
+  expect(calls).toEqual([
+    {
+      id: "codex-sh",
+      args: [
+        expect.stringContaining('eval "$buzz_script"'),
+        "codex.sh",
+        "run",
+        "app-server",
+      ],
+    },
+    { id: "codex-sh", args: ["pwd -W"] },
+  ]);
+});
+
+it("downloads the package for this computer's target", () => {
+  expect(targetOf("Darwin arm64\n")).toBe("aarch64-apple-darwin");
+  expect(targetOf("Linux x86_64")).toBe("x86_64-unknown-linux-musl");
+  expect(targetOf("MINGW64_NT-10.0-26100 x86_64\n")).toBe(
+    "x86_64-pc-windows-msvc",
+  );
+  expect(targetOf("MSYS_NT-10.0-26100 aarch64")).toBe(
+    "aarch64-pc-windows-msvc",
+  );
+  expect(targetOf("MINGW32_NT-10.0-26100 i686")).toBeUndefined();
+});
+
+it("notes when Codex shares the user's own Codex home", async () => {
+  const { spawn } = scripted({
+    "codex --version": {
+      stdout: "codex-cli 0.167.1\n",
+      stderr:
+        "Buzz's Codex shares your Codex home: Windows makes links only in Developer Mode\n",
+    },
+    "codex login status": { stdout: "Logged in using ChatGPT\n" },
+  });
+  await expect(checkCodex(spawn)).resolves.toEqual({
+    state: "ready",
+    version: "0.167.1",
+    shared: true,
+  });
+});
 
 it("finds Codex missing when Buzz has no copy", async () => {
   const { spawn } = scripted({ "codex --version": { code: 127 } });
