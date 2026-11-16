@@ -12,7 +12,7 @@ use claude_hooks::ClaudeHooks;
 use protection::ProcessProtection;
 
 use crate::credential_service::{CredentialService, Issued, ProtectedLaunch};
-use crate::host_command::{effective_path, load_login_shell_path, resolve_program};
+use crate::host_command::{declared_program, effective_path, load_login_shell_path};
 use crate::{with_manager, PluginManager};
 use buzzodz_plugins::{HostProcess, ProcessArtifact};
 use serde::{Deserialize, Serialize};
@@ -643,9 +643,15 @@ fn process_command(
     if helper.is_some() {
         command.arg("--launch").arg(program);
     }
+    #[cfg(windows)]
+    crate::host_command::git_bash::add_args(
+        &mut command,
+        executable,
+        declared_args.iter().chain(args),
+    );
+    #[cfg(not(windows))]
+    command.args(declared_args).args(args);
     command
-        .args(declared_args)
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -904,7 +910,7 @@ fn program_path(
         return verify_artifact(artifact);
     }
     if !declared.bundled {
-        return Ok(resolve_program(&declared.program, path));
+        return declared_program(&declared.program, path);
     }
     let resources = resources().ok_or_else(|| format!("Could not start {}", declared.program))?;
     Ok(resources.join("bin").join(&declared.program))

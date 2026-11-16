@@ -28,6 +28,8 @@ import script from "./claude.sh?raw";
 import { PROTECTED_CLAUDE_VERSION } from "./security";
 
 const execFileAsync = promisify(execFile);
+/** The release binary claude.sh runs: `claude.exe` under Git for Windows. */
+const claude = process.platform === "win32" ? "claude.exe" : "claude";
 const homes: string[] = [];
 const runs: PromiseWithChild<unknown>[] = [];
 afterEach(async () => {
@@ -75,7 +77,7 @@ async function disk(releases: readonly string[], current?: string) {
       ? join(home, "Library/Application Support/Buzz/claude-code")
       : join(home, ".local/share/buzz/claude-code");
   for (const version of releases) {
-    const binary = join(dir, version, "claude");
+    const binary = join(dir, version, claude);
     await mkdir(dirname(binary), { recursive: true });
     await writeFile(binary, `#!/bin/sh\necho "${version}"\n`);
     await chmod(binary, 0o755);
@@ -291,7 +293,7 @@ const release = (version: string) => `#!/bin/sh\necho "${version}"\n`;
 // A build stopped between `install` and `use` leaves the release whole but none in use.
 it("uses a downloaded release that matches its checksum without downloading it again", async () => {
   const { home, dir, step, selected } = await disk(["0.2.0"]);
-  const binary = join(dir, "0.2.0", "claude");
+  const binary = join(dir, "0.2.0", claude);
   await chmod(binary, 0o644);
   const { install, calls } = await downloads(home, "unused");
   const { stdout } = await install(
@@ -308,7 +310,7 @@ it("uses a downloaded release that matches its checksum without downloading it a
 // A release this user cannot chmod, such as one another account wrote, is still used.
 it("uses an executable matching release without changing its mode", async () => {
   const { home, dir } = await disk(["0.2.0"]);
-  const binary = join(dir, "0.2.0", "claude");
+  const binary = join(dir, "0.2.0", claude);
   const { install, calls } = await downloads(home, "unused");
   await writeFile(join(home, "bin", "chmod"), "#!/bin/sh\nexit 1\n");
   await chmod(join(home, "bin", "chmod"), 0o755);
@@ -322,7 +324,7 @@ it("uses an executable matching release without changing its mode", async () => 
 
 it("downloads again over a matching release it cannot make executable", async () => {
   const { home, dir, step, selected } = await disk([]);
-  const binary = join(dir, "0.2.0", "claude");
+  const binary = join(dir, "0.2.0", claude);
   await mkdir(dirname(binary), { recursive: true });
   await writeFile(binary, release("0.2.0"));
   await chmod(binary, 0o644);
@@ -330,7 +332,7 @@ it("downloads again over a matching release it cannot make executable", async ()
   // Refuses only the cached file, so the download can still mark its own copy executable.
   await writeFile(
     join(home, "bin", "chmod"),
-    '#!/bin/sh\ncase "$2" in */claude) exit 1 ;; esac\nexec /bin/chmod "$@"\n',
+    `#!/bin/sh\ncase "$2" in */${claude}) exit 1 ;; esac\nexec /bin/chmod "$@"\n`,
   );
   await chmod(join(home, "bin", "chmod"), 0o755);
   await install("0.2.0", sha256(release("0.2.0")));
@@ -342,7 +344,7 @@ it("downloads again over a matching release it cannot make executable", async ()
 
 it("downloads again over a release that does not match its checksum", async () => {
   const { home, dir } = await disk([]);
-  const binary = join(dir, "0.2.0", "claude");
+  const binary = join(dir, "0.2.0", claude);
   await mkdir(dirname(binary), { recursive: true });
   // Cut short, as a copy written some other way may be.
   await writeFile(binary, release("0.2.0").slice(0, 12));
@@ -354,7 +356,7 @@ it("downloads again over a release that does not match its checksum", async () =
 
 it("downloads again when a stopped download left only its partial file", async () => {
   const { home, dir } = await disk([]);
-  const binary = join(dir, "0.2.0", "claude");
+  const binary = join(dir, "0.2.0", claude);
   await mkdir(dirname(binary), { recursive: true });
   await writeFile(`${binary}.4242`, release("0.2.0"));
   const { install, calls } = await downloads(home, release("0.2.0"));
@@ -368,11 +370,11 @@ it("does not use a link to a release that matches its checksum", async () => {
   const target = join(home, "elsewhere");
   await writeFile(target, release("0.2.0"));
   await mkdir(join(dir, "0.2.0"), { recursive: true });
-  await symlink(target, join(dir, "0.2.0", "claude"));
+  await symlink(target, join(dir, "0.2.0", claude));
   const { install, calls } = await downloads(home, release("0.2.0"));
   await install("0.2.0", sha256(release("0.2.0")));
   expect(await calls()).toBe(1);
-  expect((await lstat(join(dir, "0.2.0", "claude"))).isSymbolicLink()).toBe(
+  expect((await lstat(join(dir, "0.2.0", claude))).isSymbolicLink()).toBe(
     false,
   );
 });
@@ -404,7 +406,7 @@ it("refuses a checksum that is not 64 hex digits before reusing or downloading",
       "Invalid checksum",
     );
   expect(await calls()).toBe(0);
-  expect(await readFile(join(dir, "0.2.0", "claude"), "utf8")).toBe(
+  expect(await readFile(join(dir, "0.2.0", claude), "utf8")).toBe(
     release("0.2.0"),
   );
 });
@@ -462,3 +464,39 @@ it.skipIf(process.platform !== "darwin")(
     );
   },
 );
+
+it("runs and switches to claude.exe under Git for Windows", async () => {
+  const { home } = await disk([]);
+  // Where claude.sh keeps releases off macOS, whatever this computer is.
+  const dir = join(home, ".local/share/buzz/claude-code");
+  const bin = join(home, "bin");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "uname"),
+    '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo MINGW64_NT-10.0-26100\n',
+  );
+  await chmod(join(bin, "uname"), 0o755);
+  for (const version of ["2.1.300", "2.1.301"]) {
+    const binary = join(dir, version, "claude.exe");
+    await mkdir(dirname(binary), { recursive: true });
+    await writeFile(binary, `#!/bin/sh\necho "${version}"\n`);
+    await chmod(binary, 0o755);
+  }
+  const step = (...args: string[]) =>
+    run("bash", ["-c", script, "claude.sh", ...args], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: home },
+    });
+  await expect(step("run", "--version")).rejects.toThrow(
+    "Claude is not installed",
+  );
+  await step("use", "2.1.301");
+  expect((await step("run", "--version")).stdout.trim()).toBe("2.1.301");
+  // A release without `claude.exe` was not downloaded for Windows.
+  await mkdir(join(dir, "2.1.302"));
+  await writeFile(join(dir, "2.1.302/claude"), "#!/bin/sh\n");
+  await chmod(join(dir, "2.1.302/claude"), 0o755);
+  await expect(step("use", "2.1.302")).rejects.toThrow("no longer downloaded");
+  await expect(
+    step("install", "2.1.302", "win32-arm64", "0".repeat(63)),
+  ).rejects.toThrow("Invalid checksum");
+});
