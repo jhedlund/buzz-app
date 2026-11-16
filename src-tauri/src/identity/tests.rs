@@ -740,6 +740,85 @@ async fn closing_refuses_every_key_operation_including_a_sign_started_before_it(
 }
 
 #[tokio::test]
+async fn thread_marks_round_trip_and_reject_malformed_entries() {
+    use serde_json::json;
+    let host = super::IdentityHost::fixture();
+    let root = "a".repeat(64);
+    let pins = json!({"version":1,"roots":{&root:{"pinned":true,"updatedAt":1_794_000_000_000_u64}}});
+    let done = json!({"version":1,"roots":{&root:{"done":true,"updatedAt":1,
+        "activityAt":1_794_000_000,"activityIds":["b".repeat(64)]}}});
+    for (coordinate, payload) in [("thread-pins", &pins), ("thread-done", &done)] {
+        let event = host
+            .sign_sidebar(coordinate.into(), payload.clone(), 100)
+            .await
+            .unwrap();
+        assert_eq!(event["kind"], 30078);
+        assert_eq!(event["tags"], json!([["d", coordinate], ["t", coordinate]]));
+        host.admit_sidebar(event.clone()).await.unwrap();
+        assert_eq!(
+            host.decode_sidebar(vec![event]).await.unwrap()[coordinate],
+            *payload
+        );
+    }
+    let entry = |value: serde_json::Value| json!({"version":1,"roots":{&root: value}});
+    for (coordinate, invalid) in [
+        ("thread-pins", entry(json!({"pinned":"yes","updatedAt":1}))),
+        ("thread-pins", entry(json!({"pinned":true}))),
+        ("thread-pins", entry(json!({"pinned":true,"updatedAt":-1}))),
+        ("thread-pins", entry(json!({"pinned":true,"updatedAt":1,"activityAt":1}))),
+        ("thread-done", entry(json!({"done":true,"updatedAt":1,"activityIds":[1]}))),
+        ("thread-done", entry(json!({"done":true,"updatedAt":1,"activityIds":vec!["x"; 51]}))),
+        ("thread-done", entry(json!({"pinned":true,"updatedAt":1}))),
+        ("thread-done", json!({"version":1,"roots":{"A".repeat(64):{"done":true,"updatedAt":1}}})),
+        ("thread-done", json!({"version":1,"roots":{},"extra":1})),
+        ("thread-done", json!({"version":2,"roots":{}})),
+    ] {
+        assert!(
+            host.sign_sidebar(coordinate.into(), invalid.clone(), 100)
+                .await
+                .is_err(),
+            "{coordinate} {invalid}"
+        );
+    }
+    let many: serde_json::Map<_, _> = (0..501)
+        .map(|i| (format!("{i:064x}"), json!({"pinned":true,"updatedAt":1})))
+        .collect();
+    assert!(host
+        .sign_sidebar("thread-pins".into(), json!({"version":1,"roots":many}), 100)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_record_written_the_0x_way_decodes() {
+    use nostr::event::{EventBuilder, FinalizeEvent, Kind, Tag};
+    use serde_json::json;
+    let host = super::IdentityHost::fixture();
+    // Buzz 0.x: nip44_encrypt_to_self, then a signed kind 30078 with d and t.
+    let keys = Keys::new(NostrSecretKey::from_slice(&[1; 32]).unwrap());
+    let payload = json!({"version":1,"roots":{"c".repeat(64):{"done":false,"updatedAt":5}}});
+    let content = nip44::encrypt(
+        keys.secret_key(),
+        &keys.public_key(),
+        payload.to_string(),
+        nip44::Version::V2,
+    )
+    .unwrap();
+    let event = EventBuilder::new(Kind::Custom(30078), content)
+        .tags([
+            Tag::parse(["d", "thread-done"]).unwrap(),
+            Tag::parse(["t", "thread-done"]).unwrap(),
+        ])
+        .finalize(&keys)
+        .unwrap();
+    let raw = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        host.decode_sidebar(vec![raw]).await.unwrap()["thread-done"],
+        payload
+    );
+}
+
+#[tokio::test]
 async fn sidebar_filter_signer_checks_projection_modes_and_coordinate() {
     use serde_json::json;
     let host = super::IdentityHost::fixture();

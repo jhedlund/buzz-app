@@ -598,6 +598,49 @@ fn validate_sidebar_payload(coordinate: &str, value: &serde_json::Value) -> Resu
             }
         }
 
+        // Buzz 0.x's pinned and done threads, read and written by both apps:
+        // root -> {pinned|done, updatedAt (ms), and for done activityAt and
+        // up to 50 activityIds}.
+        "thread-pins" | "thread-done" => {
+            let roots = data
+                .get("roots")
+                .and_then(|v| v.as_object())
+                .ok_or_else(invalid)?;
+            if data.len() != 2 || roots.len() > 500 {
+                return Err(invalid());
+            }
+            let pins = coordinate == "thread-pins";
+            let time = |v: Option<&serde_json::Value>| {
+                v.and_then(|v| v.as_f64())
+                    .is_some_and(|v| v.is_finite() && v >= 0.0)
+            };
+            for (root, entry) in roots {
+                let entry = entry.as_object().ok_or_else(invalid)?;
+                let flag = if pins { "pinned" } else { "done" };
+                let extra = entry.keys().any(|key| {
+                    !(key == flag
+                        || key == "updatedAt"
+                        || (!pins && (key == "activityAt" || key == "activityIds")))
+                });
+                let ids_ok = entry.get("activityIds").is_none_or(|ids| {
+                    ids.as_array().is_some_and(|ids| {
+                        ids.len() <= 50 && ids.iter().all(|id| text(id, 256))
+                    })
+                });
+                if root.len() != 64
+                    || !root
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || extra
+                    || !entry.get(flag).is_some_and(|v| v.is_boolean())
+                    || !time(entry.get("updatedAt"))
+                    || (entry.contains_key("activityAt") && !time(entry.get("activityAt")))
+                    || !ids_ok
+                {
+                    return Err(invalid());
+                }
+            }
+        }
         "main-agent" => {
             let agent = data.get("agent").ok_or_else(invalid)?;
             if data.len() != 2
@@ -803,6 +846,8 @@ pub(crate) fn sidebar_coordinate(value: &str) -> bool {
             | "channel-sort"
             | "channel-filter"
             | "main-agent"
+            | "thread-pins"
+            | "thread-done"
     )
 }
 
