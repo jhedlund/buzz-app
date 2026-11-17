@@ -68,6 +68,7 @@ async function fixture({
   hold,
   holdActivity,
   marks,
+  holdMarks,
 }: {
   empty?: boolean;
   writable?: boolean;
@@ -76,6 +77,8 @@ async function fixture({
   holdActivity?: Promise<void>;
   /** Private pin and done records by coordinate; omitted: no host for them. */
   marks?: Record<string, unknown>;
+  /** Holds every marks read open until it resolves. */
+  holdMarks?: Promise<void>;
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   // The relay's current heads and stored replies; a test changes them as the
@@ -167,9 +170,10 @@ async function fixture({
       return { status: "saved" };
     },
   );
-  const readThreadMarks = vi.fn(async (coordinate: string) =>
-    records ? records[coordinate] : undefined,
-  );
+  const readThreadMarks = vi.fn(async (coordinate: string) => {
+    await holdMarks;
+    return records ? records[coordinate] : undefined;
+  });
   const session = {
     unread: {
       activity: (channelId: string) => ({
@@ -725,6 +729,56 @@ it("reopens a done thread once it has newer activity", async () => {
   expect(
     screen.queryByRole("button", { name: /^Done/ }),
   ).not.toBeInTheDocument();
+});
+
+it("draws no rows until the first marks read settles, so pinned threads don't jump", async () => {
+  let release = () => {};
+  const holdMarks = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = await fixture({
+    holdMarks,
+    marks: {
+      "thread-pins": {
+        version: 1,
+        roots: { [B]: { pinned: true, updatedAt: 1 } },
+      },
+      "thread-done": { version: 1, roots: {} },
+    },
+  });
+  // Titles and replies are in; only the marks are outstanding.
+  await waitFor(() => expect(f.read).toHaveBeenCalled());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(
+    screen.queryByRole("list", { name: "Named threads" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("Launch plan")).not.toBeInTheDocument();
+  release();
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+
+  // Reopened, the page draws its groups from the last marks at once while
+  // the next read is held.
+  f.view.unmount();
+  let releaseAgain = () => {};
+  const again = new Promise<void>((resolve) => {
+    releaseAgain = resolve;
+  });
+  const read = f.readThreadMarks.getMockImplementation();
+  f.readThreadMarks.mockImplementation(async (...args) => {
+    await again;
+    return read?.(...args);
+  });
+  f.mount();
+  expect(await list("Pinned threads")).toEqual(["Bug triagebeta"]);
+  releaseAgain();
+});
+
+it("shows the list when the first marks read fails", async () => {
+  await fixture({ marks: { "thread-pins": { version: 7 } } });
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "couldn't be read",
+  );
+  expect(await rows()).toBeTruthy();
 });
 
 it("writes nothing over a record it can't read", async () => {
