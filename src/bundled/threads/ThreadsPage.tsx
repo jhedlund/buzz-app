@@ -244,8 +244,8 @@ export function ThreadsView({
         ),
       );
       if (!pins || !done || signal.aborted) return;
-      // Kept outside React state, so a read that lands after the page
-      // closed still reaches the next one.
+      // The session cache is updated directly, not through React state, so
+      // it never depends on this view still being mounted.
       lastMarks.set(session, { pins, done });
       setSaved({ pins, done });
     },
