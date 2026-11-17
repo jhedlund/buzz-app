@@ -206,22 +206,8 @@ export function ThreadsView({
   // What the relay last said, and the changes not yet saved: the page shows
   // the saved marks with every pending change applied, so a read or a
   // write's result never hides a change still in the queue.
-  const [saved, setSavedState] = useState<SavedMarks | undefined>(() =>
+  const [saved, setSaved] = useState<SavedMarks | undefined>(() =>
     lastMarks.get(session),
-  );
-  const setSaved = useCallback(
-    (
-      next:
-        | SavedMarks
-        | undefined
-        | ((current: SavedMarks | undefined) => SavedMarks | undefined),
-    ) =>
-      setSavedState((current) => {
-        const value = typeof next === "function" ? next(current) : next;
-        if (value) lastMarks.set(session, value);
-        return value;
-      }),
-    [session],
   );
   const [pending, setPending] = useState<readonly MarkChange[]>([]);
   const marks = useMemo(() => {
@@ -257,9 +243,13 @@ export function ThreadsView({
           parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
         ),
       );
-      if (pins && done && !signal.aborted) setSaved({ pins, done });
+      if (!pins || !done || signal.aborted) return;
+      // Kept outside React state, so a read that lands after the page
+      // closed still reaches the next one.
+      lastMarks.set(session, { pins, done });
+      setSaved({ pins, done });
     },
-    [readMarks, setSaved],
+    [readMarks, session],
   );
   useEffect(() => {
     void marksGeneration;
@@ -306,6 +296,8 @@ export function ThreadsView({
               AbortSignal.timeout(20_000),
             ),
           );
+          const cached = lastMarks.get(session);
+          if (cached) lastMarks.set(session, { ...cached, [kind]: result });
           setSaved((current) => current && { ...current, [kind]: result });
           settle();
           if (!!result.get(root)?.on !== on)
@@ -319,7 +311,7 @@ export function ThreadsView({
         }
       });
     },
-    [writeMarks, readSaved, setSaved],
+    [writeMarks, readSaved, session],
   );
 
   const refresh = () => {
@@ -583,6 +575,7 @@ export function ThreadsView({
     );
   };
   const awaitingMarks = !!readMarks && !marksSettled;
+  const listPending = (!rows || awaitingMarks) && !error;
   const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
   const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
   // Pinned wins over done for placement: a pinned done thread stays pinned.
@@ -635,9 +628,11 @@ export function ThreadsView({
           )}
           <div className={styles.scroller}>
             <LoadingRegion
-              pending={(!rows || awaitingMarks) && !error}
+              pending={listPending}
               label="Loading threads…"
-              statusVisibility="screen-reader"
+              // Shown while the page waits, since a slow marks read can leave
+              // the list empty with titles in; once drawn, the list needs no row.
+              statusVisibility={listPending ? "visible" : "screen-reader"}
             >
               {!rows || awaitingMarks ? null : sorted.length === 0 ? (
                 <EmptyState
