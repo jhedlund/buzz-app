@@ -773,6 +773,62 @@ it("draws no rows until the first marks read settles, so pinned threads don't ju
   releaseAgain();
 });
 
+it("says it is loading while a slow marks read holds the list", async () => {
+  let release = () => {};
+  const holdMarks = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await fixture({
+    holdMarks,
+    marks: {
+      "thread-pins": { version: 1, roots: {} },
+      "thread-done": { version: 1, roots: {} },
+    },
+  });
+  const status = await screen.findByRole("status", {}, { timeout: 3000 });
+  expect(status).toHaveTextContent("Loading threads…");
+  expect(status).not.toHaveClass("sr-only");
+  release();
+  await rows();
+});
+
+it("reopens with a pin whose save was acknowledged after the page closed", async () => {
+  const f = await fixture({
+    marks: {
+      "thread-pins": { version: 1, roots: {} },
+      "thread-done": { version: 1, roots: {} },
+    },
+  });
+  await rows();
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const write = f.writeThreadMarks.getMockImplementation();
+  let saved: Promise<unknown> | undefined;
+  f.writeThreadMarks.mockImplementation(async (...args) => {
+    await gate;
+    saved = write?.(...args);
+    return saved;
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Pin Launch plan" }),
+  );
+  await waitFor(() => expect(f.writeThreadMarks).toHaveBeenCalled());
+  f.view.unmount();
+  release();
+  await waitFor(() => expect(saved).toBeDefined());
+  await saved;
+  // The reopened page's own read is held, so only the cache can show the pin.
+  const read = f.readThreadMarks.getMockImplementation();
+  f.readThreadMarks.mockImplementation(async (...args) => {
+    await new Promise(() => {});
+    return read?.(...args);
+  });
+  f.mount();
+  expect(await list("Pinned threads")).toEqual(["Launch planalpha"]);
+});
+
 it("shows the list when the first marks read fails", async () => {
   await fixture({ marks: { "thread-pins": { version: 7 } } });
   expect(await screen.findByRole("alert")).toHaveTextContent(
