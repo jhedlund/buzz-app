@@ -162,6 +162,11 @@ function TitleField({
   );
 }
 
+type SavedMarks = Readonly<{ pins: Marks; done: Marks }>;
+/** The marks each session last read or wrote, so reopening the page draws
+ * its groups at once and the read on open only refreshes them. */
+const lastMarks = new WeakMap<object, SavedMarks>();
+
 export function ThreadsView({
   session,
   scope,
@@ -201,9 +206,9 @@ export function ThreadsView({
   // What the relay last said, and the changes not yet saved: the page shows
   // the saved marks with every pending change applied, so a read or a
   // write's result never hides a change still in the queue.
-  const [saved, setSaved] = useState<
-    Readonly<{ pins: Marks; done: Marks }> | undefined
-  >();
+  const [saved, setSaved] = useState<SavedMarks | undefined>(() =>
+    lastMarks.get(session),
+  );
   const [pending, setPending] = useState<readonly MarkChange[]>([]);
   const marks = useMemo(() => {
     if (!saved) return undefined;
@@ -221,6 +226,11 @@ export function ThreadsView({
     return shown;
   }, [saved, pending]);
   const [showDone, setShowDone] = useState(false);
+  // The list waits for the first marks read to settle, failed or not, so
+  // pinned and done threads don't jump out of the list once it arrives.
+  const [marksSettled, setMarksSettled] = useState(() =>
+    lastMarks.has(session),
+  );
   const [marksGeneration, setMarksGeneration] = useState(0);
   // Reads and writes of the marks run one at a time, so a read never lands
   // after a later write it doesn't include.
@@ -233,9 +243,13 @@ export function ThreadsView({
           parseMarks(kind, await readMarks(MARK_COORDINATE[kind], signal)),
         ),
       );
-      if (pins && done && !signal.aborted) setSaved({ pins, done });
+      if (!pins || !done || signal.aborted) return;
+      // The session cache is updated directly, not through React state, so
+      // it never depends on this view still being mounted.
+      lastMarks.set(session, { pins, done });
+      setSaved({ pins, done });
     },
-    [readMarks],
+    [readMarks, session],
   );
   useEffect(() => {
     void marksGeneration;
@@ -243,14 +257,16 @@ export function ThreadsView({
     const controller = new AbortController();
     const { signal } = controller;
     marksQueue.current = marksQueue.current.then(() =>
-      readSaved(AbortSignal.any([signal, AbortSignal.timeout(20_000)])).catch(
-        (cause) => {
+      readSaved(AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+        .catch((cause) => {
           if (!signal.aborted)
             setSaveError(
               cause instanceof Error ? cause.message : String(cause),
             );
-        },
-      ),
+        })
+        .finally(() => {
+          if (!signal.aborted) setMarksSettled(true);
+        }),
     );
     return () => controller.abort();
   }, [readMarks, readSaved, marksGeneration]);
@@ -280,6 +296,8 @@ export function ThreadsView({
               AbortSignal.timeout(20_000),
             ),
           );
+          const cached = lastMarks.get(session);
+          if (cached) lastMarks.set(session, { ...cached, [kind]: result });
           setSaved((current) => current && { ...current, [kind]: result });
           settle();
           if (!!result.get(root)?.on !== on)
@@ -293,7 +311,7 @@ export function ThreadsView({
         }
       });
     },
-    [writeMarks, readSaved],
+    [writeMarks, readSaved, session],
   );
 
   const refresh = () => {
@@ -556,6 +574,8 @@ export function ThreadsView({
       </li>
     );
   };
+  const awaitingMarks = !!readMarks && !marksSettled;
+  const listPending = (!rows || awaitingMarks) && !error;
   const pinned = sorted.filter((r) => marks?.pins.get(r.root)?.on);
   const unpinned = sorted.filter((r) => !marks?.pins.get(r.root)?.on);
   // Pinned wins over done for placement: a pinned done thread stays pinned.
@@ -608,11 +628,13 @@ export function ThreadsView({
           )}
           <div className={styles.scroller}>
             <LoadingRegion
-              pending={!rows && !error}
+              pending={listPending}
               label="Loading threads…"
-              statusVisibility="screen-reader"
+              // Shown while the page waits, since a slow marks read can leave
+              // the list empty with titles in; once drawn, the list needs no row.
+              statusVisibility={listPending ? "visible" : "screen-reader"}
             >
-              {!rows ? null : sorted.length === 0 ? (
+              {!rows || awaitingMarks ? null : sorted.length === 0 ? (
                 <EmptyState
                   icon={<MessageReplyIcon size={24} />}
                   title={
