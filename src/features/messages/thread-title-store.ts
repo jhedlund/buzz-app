@@ -188,8 +188,12 @@ function createStore(session: Session): ThreadTitleStore {
         })
         .catch((cause) => {
           if (signal.aborted) return;
-          // Failed channels are read again after a backoff.
-          for (const c of channels) failed.add(c);
+          // Failed channels wait for the backoff, even when live changes
+          // mark them stale meanwhile.
+          for (const c of channels) {
+            failed.add(c);
+            stale.delete(c);
+          }
           failures += 1;
           clearTimeout(retry);
           retry = setTimeout(() => {
@@ -214,12 +218,14 @@ function createStore(session: Session): ThreadTitleStore {
       if (reading) return;
       const channels = [...stale];
       stale.clear();
-      run(channels, false);
+      if (channels.length) run(channels, false);
     };
     const stopFollow = session.artifacts.follow(ids, (events) => {
       void staleChannels(events, joined).then((changed) => {
         if (signal.aborted || !changed.size) return;
-        for (const channel of changed) stale.add(channel);
+        for (const channel of changed)
+          if (!failed.has(channel)) stale.add(channel);
+        if (!stale.size) return;
         if (reading) return;
         clearTimeout(timer);
         timer = setTimeout(flush, TITLE_DEBOUNCE_MS);

@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { enableThreadTitles } from "../../features/messages/thread-title-store";
+import {
+  enableThreadTitles,
+  threadTitleStore,
+} from "../../features/messages/thread-title-store";
 import { titleRevision } from "../../features/messages/thread-titles";
 import type { Panels } from "../../features/panels/service";
 import type { ReadFilter, RelayEvent } from "../../features/relay/events";
@@ -133,7 +136,15 @@ async function harness({
         | { name?: string }
         | undefined
     )?.name;
-  return { session, publish, snapshotRead, writerTaken, item, localName };
+  return {
+    session,
+    heads,
+    publish,
+    snapshotRead,
+    writerTaken,
+    item,
+    localName,
+  };
 }
 
 it("labels a thread tab with its local name, then its shared title, then its text", async () => {
@@ -203,6 +214,62 @@ it("a failed shared write drops the typed name and offers a retry", async () => 
     "title",
     "Ship plan",
   ]);
+});
+
+it("Retry keeps the revision it was typed over, and a conflict offers none", async () => {
+  const publish = vi.fn(async (_event: RelayEvent): Promise<unknown> => {
+    throw new PublishRejected("Rejected", "relay unavailable");
+  });
+  const h = await harness({ title: "Launch plan", publish });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("Ship plan"));
+  await waitFor(() => expect(toasts.notify).toHaveBeenCalledOnce());
+  const retry = toasts.notify.mock.calls[0]?.[2];
+  // Meanwhile someone else retitles the thread, and this client sees it.
+  const theirs = await titleRevision(
+    ALPHA,
+    ROOT,
+    { op: "update", prev: "e1" },
+    "Their plan",
+  );
+  const head = { ...theirs, id: "e2", pubkey: "", sig: "" };
+  h.heads.splice(0, 1, head as unknown as RelayEvent);
+  act(() =>
+    threadTitleStore(h.session).apply(ALPHA, ROOT, {
+      title: "Their plan",
+      channel: ALPHA,
+      root: ROOT,
+      revision: "e2",
+      updatedAt: 2,
+    }),
+  );
+  // Retry still expects e1, so it conflicts instead of replacing their title.
+  act(() => retry?.onClick());
+  await waitFor(() => expect(toasts.notify).toHaveBeenCalledTimes(2));
+  const [message, , action] = toasts.notify.mock.calls[1] ?? [];
+  expect(message).toMatch(/Someone else changed this thread/);
+  expect(action).toBeUndefined();
+  expect(publish).toHaveBeenCalledOnce();
+  expect(h.localName()).toBeFalsy();
+  expect(h.item()?.label).toBe("Their plan");
+});
+
+it("an older failure's Retry does nothing after a newer rename", async () => {
+  const publish = vi.fn(async (_event: RelayEvent): Promise<unknown> => {
+    throw new PublishRejected("Rejected", "relay unavailable");
+  });
+  const h = await harness({ title: "Launch plan", publish });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("Ship plan"));
+  await waitFor(() => expect(toasts.notify).toHaveBeenCalledOnce());
+  const stale = toasts.notify.mock.calls[0]?.[2];
+  publish.mockResolvedValueOnce("");
+  act(() => h.item()?.rename?.("Final plan"));
+  await waitFor(() => expect(h.localName()).toBeFalsy());
+  expect(h.item()?.label).toBe("Final plan");
+  act(() => stale?.onClick());
+  expect(h.item()?.label).toBe("Final plan");
+  expect(publish).toHaveBeenCalledTimes(2);
 });
 
 it("a name over the byte limit says so and changes nothing", async () => {

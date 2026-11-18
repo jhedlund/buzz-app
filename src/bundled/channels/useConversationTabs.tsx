@@ -29,6 +29,7 @@ import {
 import {
   activityKey,
   normalizeTitle,
+  TitleConflict,
   writeTitle,
 } from "../../features/messages/thread-titles";
 import {
@@ -788,6 +789,9 @@ export function useConversationTabs({
   // threads stay distinguishable by their original message.
   const sharedTitles = useThreadTitles(queries).titles;
   const notify = useToastNotification();
+  // The latest shared rename per tab: an older write's outcome or Retry
+  // must not undo a newer one.
+  const renames = useRef(new Map<string, number>());
   function threadLabel(tab: Extract<Tab, { kind: "thread" }>, name?: string) {
     if (tab.name) return tab.name;
     const rootId = rootOfTab(tab);
@@ -806,8 +810,8 @@ export function useConversationTabs({
   }
   // With shared titles on, renaming a thread tab names the thread for
   // everyone. The typed name shows on this tab until the write lands. A failed
-  // write drops it, so it can't hide the shared title, and says so with a
-  // retry. A blank name only drops the local one.
+  // write drops it, so it can't hide the shared title, and says so. A blank
+  // name only drops the local one.
   function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
     if (!threadTitlesEnabled()) return tabState.renameTab(tab.id, name);
     const rootId = rootOfTab(tab);
@@ -823,39 +827,49 @@ export function useConversationTabs({
     if (!desired) return tabState.renameTab(tab.id, "");
     if (!read || !writer) return tabState.renameTab(tab.id, desired);
     const store = threadTitleStore(queries);
-    const title = desired;
-    tabState.renameTab(tab.id, title);
-    writeTitle(
-      read,
-      writer,
-      {
-        channel: tab.channelId,
-        root: rootId,
-        revision: store.get(tab.channelId, rootId)?.revision,
-      },
-      title,
-      AbortSignal.timeout(20_000),
-    ).then(
-      (revision) => {
-        if (revision)
-          store.apply(tab.channelId, rootId, {
-            title,
-            channel: tab.channelId,
-            root: rootId.toLowerCase(),
-            revision,
-            updatedAt: Math.floor(Date.now() / 1000),
-          });
-        tabState.renameTab(tab.id, "");
-      },
-      (cause) => {
-        tabState.renameTab(tab.id, "");
-        const reason = cause instanceof Error ? cause.message : String(cause);
-        notify(`Couldn’t save the thread title. ${reason}`, "error", {
-          label: "Retry",
-          onClick: () => renameThread(tab, title),
-        });
-      },
-    );
+    // Retry writes against the revision this rename was typed over, so it
+    // can never replace a title someone else set meanwhile.
+    const expected = store.get(tab.channelId, rootId)?.revision;
+    const save = () => {
+      const id = (renames.current.get(tab.id) ?? 0) + 1;
+      renames.current.set(tab.id, id);
+      const latest = () => renames.current.get(tab.id) === id;
+      tabState.renameTab(tab.id, desired);
+      writeTitle(
+        read,
+        writer,
+        { channel: tab.channelId, root: rootId, revision: expected },
+        desired,
+        AbortSignal.timeout(20_000),
+      ).then(
+        (revision) => {
+          if (revision)
+            store.apply(tab.channelId, rootId, {
+              title: desired,
+              channel: tab.channelId,
+              root: rootId.toLowerCase(),
+              revision,
+              updatedAt: Math.floor(Date.now() / 1000),
+            });
+          if (latest()) tabState.renameTab(tab.id, "");
+        },
+        (cause) => {
+          if (!latest()) return;
+          tabState.renameTab(tab.id, "");
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          // After a conflict the tab shows the current title; renaming again
+          // writes over that one.
+          notify(
+            `Couldn’t save the thread title. ${reason}`,
+            "error",
+            cause instanceof TitleConflict
+              ? undefined
+              : { label: "Retry", onClick: () => latest() && save() },
+          );
+        },
+      );
+    };
+    save();
   }
   // The current conversation's own threads are already in its channel.
   function openInChannel(tab: Tab, target: ChannelSummary | undefined) {

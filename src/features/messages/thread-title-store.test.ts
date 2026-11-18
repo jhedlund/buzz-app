@@ -134,22 +134,44 @@ describe("thread title store", () => {
       for (let i = 0; i < 100 && !done(); i++) await tick();
       expect(done()).toBe(true);
     };
+    // A live revision is checked against its derived id before it marks a
+    // channel stale; wait for that hash, then for the store to act on it.
+    const digest = vi.spyOn(crypto.subtle, "digest");
     try {
       const f = fixture([await head("e1", "Launch plan")]);
+      const live = async (event: RelayEvent) => {
+        const before = digest.mock.results.length;
+        f.follow.listener?.([event]);
+        await until(() => digest.mock.results.length > before);
+        await digest.mock.results.at(-1)?.value;
+        await tick();
+      };
       f.snapshotRead.mockRejectedValueOnce(new Error("Relay offline"));
       const store = threadTitleStore(f.session);
       const stop = store.subscribe(() => {});
       await until(() => store.snapshot().error === "Relay offline");
       expect(store.snapshot().titles?.size).toBe(0);
+      // A live change in a failed channel waits for the backoff too.
+      const renamed = await head("e2", "Launch plan");
+      await live(renamed);
       vi.advanceTimersByTime(4_999);
       await tick();
       expect(f.snapshotRead).toHaveBeenCalledTimes(1);
-      // The second failure waits twice as long; existing titles stay.
-      f.snapshotRead.mockRejectedValueOnce(new Error("Still offline"));
+      // The second failure waits twice as long, even when a live change
+      // arrived while that read was pending.
+      let fail: (cause: Error) => void = () => {};
+      f.snapshotRead.mockImplementationOnce(
+        () => new Promise((_, reject) => (fail = reject)),
+      );
       vi.advanceTimersByTime(1);
+      await until(() => f.snapshotRead.mock.calls.length === 2);
+      await live(renamed);
+      fail(new Error("Still offline"));
       await until(() => store.snapshot().error === "Still offline");
+      vi.advanceTimersByTime(300);
+      await tick();
       expect(f.snapshotRead).toHaveBeenCalledTimes(2);
-      vi.advanceTimersByTime(9_999);
+      vi.advanceTimersByTime(9_699);
       await tick();
       expect(f.snapshotRead).toHaveBeenCalledTimes(2);
       vi.advanceTimersByTime(1);
@@ -165,6 +187,7 @@ describe("thread title store", () => {
       await tick();
       expect(f.snapshotRead).toHaveBeenCalledTimes(4);
     } finally {
+      digest.mockRestore();
       random.mockRestore();
       vi.useRealTimers();
     }
