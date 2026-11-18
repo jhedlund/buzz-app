@@ -152,7 +152,9 @@ impl Session {
                 .collect::<Result<_>>()?,
         })?)
     }
-    async fn launch(&mut self, args: &[String]) -> Result<i32> {
+    /// Runs a command inside this session. `msys` marks one of Git for
+    /// Windows' POSIX programs, which reads its command line by MSYS rules.
+    async fn launch(&mut self, args: &[String], msys: bool) -> Result<i32> {
         let (program, args) = args.split_first().ok_or("A command is required")?;
         self.rpc(
             "initialize",
@@ -177,8 +179,22 @@ impl Session {
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                 .collect::<Vec<_>>(),
         );
-        let status = Command::new(program)
-            .args(args)
+        let mut command = Command::new(program);
+        #[cfg(windows)]
+        for arg in args {
+            if msys {
+                use std::os::windows::process::CommandExt as _;
+                command.raw_arg(msys_quote(arg));
+            } else {
+                command.arg(arg);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = msys;
+            command.args(args);
+        }
+        let status = command
             .env(CONNECTION, self.connection()?)
             .env("PATH", std::env::join_paths(paths)?)
             .status()?;
@@ -494,6 +510,22 @@ fn arguments(args: &[String], catalog: &Value) -> Result<(String, Value)> {
     };
     Ok((name.clone(), arguments))
 }
+/// One argument in double quotes, read back unchanged by the MSYS runtime.
+/// Inside quotes it drops a backslash before any `\` or `"`, wherever it is,
+/// so every one of them is escaped. A copy of the app's `git_bash::quote`.
+#[cfg(any(windows, test))]
+fn msys_quote(arg: &str) -> String {
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    for character in arg.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
 fn main() {
     let result = (|| -> Result<i32> {
         let args: Vec<_> = std::env::args().collect();
@@ -526,8 +558,10 @@ fn main() {
         };
         let buzz = Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) == Some("buzz");
         match args.get(1).map(String::as_str) {
-            Some("--launch") if !buzz => runtime
-                .block_on(Session::open(serde_json::from_str(required()?)?)?.launch(&args[2..])),
+            Some(flag @ ("--launch" | "--launch-msys")) if !buzz => runtime.block_on(
+                Session::open(serde_json::from_str(required()?)?)?
+                    .launch(&args[2..], flag == "--launch-msys"),
+            ),
             Some("--advertise") if !buzz => advertise(required()?),
             Some("--help" | "-h") | None => {
                 // An agent outside a command has no `buzz` alias; it keeps using this path.
@@ -572,6 +606,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The app's `git_bash` tests read these back through a port of the MSYS
+    // runtime's parser; this copy must quote the same way.
+    #[test]
+    fn quotes_for_msys_like_the_app() {
+        assert_eq!(msys_quote(""), r#""""#);
+        assert_eq!(msys_quote(r"\\server\share"), r#""\\\\server\\share""#);
+        assert_eq!(msys_quote(r#"{"p":"C:\\x"}"#), r#""{\"p\":\"C:\\\\x\"}""#);
+        assert_eq!(msys_quote("a{b,c} *"), r#""a{b,c} *""#);
+    }
     #[test]
     fn refuses_non_app_endpoints() {
         for url in [

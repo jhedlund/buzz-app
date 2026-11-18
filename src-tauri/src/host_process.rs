@@ -13,7 +13,8 @@ use protection::ProcessProtection;
 
 use crate::credential_service::{CredentialService, Issued, ProtectedLaunch};
 use crate::host_command::{
-    effective_path, load_login_shell_environment, login_shell_environment, resolve_program,
+    declared_program, effective_path, load_login_shell_environment, login_shell_environment,
+    Program,
 };
 use crate::{with_manager, PluginManager};
 use buzzodz_plugins::{HostProcess, ProcessArtifact};
@@ -420,6 +421,7 @@ pub(crate) async fn plugin_host_process_spawn<R: tauri::Runtime>(
         .transpose()?;
     let page = processes.page();
     let plugin = id.clone();
+    let git = crate::host_command::uses_git_for_windows(&id, &revision);
     let (declared, registry, policies) = with_manager(manager, move |manager| {
         let registry = manager.storage_root().to_path_buf();
         let policies = manager.managed_policy_paths();
@@ -465,13 +467,14 @@ pub(crate) async fn plugin_host_process_spawn<R: tauri::Runtime>(
         if let Some(store) = store {
             protected_program_path(&descriptor, || resources, &store)
         } else {
-            program_path(&descriptor, || resources, &launch_path)
+            program_path(&descriptor, || resources, &launch_path, git)
         }
     })
     .await
     .map_err(|_| "Artifact preparation failed")??;
     let artifact_parent = declared.artifact.as_ref().map(|_| {
         program
+            .path
             .parent()
             .expect("absolute artifact path has a parent")
             .to_path_buf()
@@ -696,14 +699,16 @@ fn without_bundle_paths(value: &OsStr, appdir: &Path) -> Option<Option<OsString>
 }
 
 /// The verified target stays inside the MCP prefix and the same containment.
+/// The helper reads its own arguments natively and passes them on quoted the
+/// way the program reads them.
 fn process_command(
-    program: &std::path::Path,
+    program: &Program,
     helper: Option<&std::path::Path>,
     profile: Option<&str>,
     declared_args: &[String],
     args: &[String],
 ) -> Command {
-    let executable = helper.unwrap_or(program);
+    let executable = helper.unwrap_or(&program.path);
     let mut command = if let Some(profile) = profile {
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", profile]).arg(executable);
@@ -712,11 +717,23 @@ fn process_command(
         Command::new(executable)
     };
     if helper.is_some() {
-        command.arg("--launch").arg(program);
+        command
+            .arg(if program.msys {
+                "--launch-msys"
+            } else {
+                "--launch"
+            })
+            .arg(&program.path);
     }
+    #[cfg(windows)]
+    crate::host_command::git_bash::add_args(
+        &mut command,
+        program.msys && helper.is_none(),
+        declared_args.iter().chain(args),
+    );
+    #[cfg(not(windows))]
+    command.args(declared_args).args(args);
     command
-        .args(declared_args)
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -970,15 +987,18 @@ fn program_path(
     declared: &HostProcess,
     resources: impl FnOnce() -> Option<PathBuf>,
     path: &OsStr,
-) -> Result<PathBuf, String> {
+    git: bool,
+) -> Result<Program, String> {
     if let Some(artifact) = &declared.artifact {
-        return verify_artifact(artifact);
+        return verify_artifact(artifact).map(Program::native);
     }
     if !declared.bundled {
-        return Ok(resolve_program(&declared.program, path));
+        return declared_program(&declared.program, path, git);
     }
     let resources = resources().ok_or_else(|| format!("Could not start {}", declared.program))?;
-    Ok(resources.join("bin").join(&declared.program))
+    Ok(Program::native(
+        resources.join("bin").join(&declared.program),
+    ))
 }
 
 /// Contained launches never resolve an executable on a worker-writable PATH.
@@ -986,14 +1006,14 @@ fn protected_program_path(
     declared: &HostProcess,
     resources: impl FnOnce() -> Option<PathBuf>,
     store: &std::path::Path,
-) -> Result<PathBuf, String> {
+) -> Result<Program, String> {
     if let Some(artifact) = &declared.artifact {
-        return artifact::snapshot(artifact, store);
+        return artifact::snapshot(artifact, store).map(Program::native);
     }
     if !declared.bundled {
         return Err("Protected processes require a declared artifact or bundled executable".into());
     }
-    program_path(declared, resources, OsStr::new(""))
+    program_path(declared, resources, OsStr::new(""), false)
 }
 
 /// The rest of a path written `~/…`, or on Windows also `~\…`.

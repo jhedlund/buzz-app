@@ -1563,6 +1563,11 @@ available rather than silently discarding it.
   there, and fail until there is one, or while Codex's sign-in is for another
   workspace. Codex's harness defaults offer that sign-in while Codex is signed
   out. API key and keyring sign-ins can't run them.
+- On Windows, local Claude and Codex agents run their setup through Git for
+  Windows, which must be installed. Codex also needs Windows Developer Mode
+  (Windows Settings → System → For developers), because Buzz keeps its own
+  Codex folder linked to your settings and sign-in. Settings says which one
+  is missing. Security reviews for protected agents are macOS-only.
 - **Agent gateway access**: in builds that route local agents through a gateway,
   a refused sign-in or access check stops the turn and asks you to sign in again.
   Later turns stay blocked while access is rechecked, even if that check stalls

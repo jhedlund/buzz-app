@@ -11,6 +11,7 @@ import {
   CodexSetup,
   explainTurn,
   reviewHome,
+  targetOf,
   withScript,
 } from "./setup";
 import manifest from "./manifest.json";
@@ -100,6 +101,50 @@ function scripted(output: Record<string, Partial<Result>>, account?: Account) {
   };
   return { spawn, calls };
 }
+
+it("starts codex.sh from the environment and names the workspace as Windows does, on Windows", async () => {
+  const { spawn, calls } = scripted({});
+  const run = withScript(spawn, true);
+  await run("app-server");
+  await run("workspace", { cwd: "~/work" });
+  expect(calls).toEqual([
+    {
+      id: "codex-sh",
+      args: [
+        expect.stringContaining('eval "$buzz_script"'),
+        "codex.sh",
+        "run",
+        "app-server",
+      ],
+    },
+    { id: "codex-sh", args: ["pwd -W"] },
+  ]);
+});
+
+it("downloads the package for this computer's target", () => {
+  expect(targetOf("Darwin arm64\n")).toBe("aarch64-apple-darwin");
+  expect(targetOf("Linux x86_64")).toBe("x86_64-unknown-linux-musl");
+  expect(targetOf("MINGW64_NT-10.0-26100 x86_64\n")).toBe(
+    "x86_64-pc-windows-msvc",
+  );
+  expect(targetOf("MSYS_NT-10.0-26100 aarch64")).toBe(
+    "aarch64-pc-windows-msvc",
+  );
+  expect(targetOf("MINGW32_NT-10.0-26100 i686")).toBeUndefined();
+});
+
+it("reports why Codex can't start, such as Windows without Developer Mode", async () => {
+  const { spawn } = scripted({
+    "codex --version": {
+      stderr: "Codex on Windows needs Developer Mode: turn it on\n",
+      code: 1,
+    },
+  });
+  await expect(checkCodex(spawn)).resolves.toEqual({
+    state: "error",
+    message: "Codex on Windows needs Developer Mode: turn it on",
+  });
+});
 
 it("finds Codex missing when Buzz has no copy", async () => {
   const { spawn } = scripted({ "codex --version": { code: 127 } });

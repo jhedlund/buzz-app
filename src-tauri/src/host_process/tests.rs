@@ -473,14 +473,16 @@ fn a_bundled_program_runs_from_the_app_bin_never_path() {
         program_path(
             &process(true),
             || Some(PathBuf::from("/app/resources")),
-            path
+            path,
+            false
         )
-        .unwrap(),
+        .unwrap()
+        .path,
         PathBuf::from("/app/resources/bin/goose-acp")
     );
-    assert!(program_path(&process(true), || None, path).is_err());
+    assert!(program_path(&process(true), || None, path, false).is_err());
     // Only a bundled program asks for the resources.
-    assert!(program_path(&process(false), || unreachable!(), path).is_ok());
+    assert!(program_path(&process(false), || unreachable!(), path, false).is_ok());
 }
 
 #[test]
@@ -617,7 +619,8 @@ fn protected_launch_refuses_path_programs_and_preserves_bundled_resolution() {
             || Some(PathBuf::from("/app/resources")),
             store.path()
         )
-        .unwrap(),
+        .unwrap()
+        .path,
         PathBuf::from("/app/resources/bin/buzz-agent-command")
     );
 }
@@ -644,20 +647,21 @@ fn artifact_program_requires_exact_executable_and_sibling_bytes() {
     }))
     .unwrap();
     assert_eq!(
-        program_path(&process, || unreachable!(), OsStr::new("")),
+        program_path(&process, || unreachable!(), OsStr::new(""), false)
+            .map(|program| program.path),
         Ok(executable.clone())
     );
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(program_path(&process, || unreachable!(), OsStr::new("")).is_err());
+    assert!(program_path(&process, || unreachable!(), OsStr::new(""), false).is_err());
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(&sibling, "changed").unwrap();
-    assert!(program_path(&process, || unreachable!(), OsStr::new("")).is_err());
+    assert!(program_path(&process, || unreachable!(), OsStr::new(""), false).is_err());
     std::fs::write(&sibling, "original").unwrap();
     std::fs::remove_file(&executable).unwrap();
     let target = root.join("actual");
     std::fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
     symlink(&target, &executable).unwrap();
-    assert!(program_path(&process, || unreachable!(), OsStr::new("")).is_err());
+    assert!(program_path(&process, || unreachable!(), OsStr::new(""), false).is_err());
 }
 
 #[test]
@@ -712,11 +716,12 @@ async fn protected_launches_keep_the_startup_agents_root_when_release_storage_ap
         || unreachable!(),
         &first_root.join("artifacts"),
     )
-    .unwrap();
+    .unwrap()
+    .path;
     let first_profile = protection.profile(&[first_root]).unwrap();
     let run = |profile: &str, script: &str, path: &Path| {
         let mut command = process_command(
-            Path::new("/bin/sh"),
+            &Program::native("/bin/sh".into()),
             None,
             Some(profile),
             &[],
@@ -746,7 +751,8 @@ async fn protected_launches_keep_the_startup_agents_root_when_release_storage_ap
         || unreachable!(),
         &second_root.join("artifacts"),
     )
-    .unwrap();
+    .unwrap()
+    .path;
     assert_eq!(staged, first_target);
     assert!(staged.starts_with(startup_root.join("artifacts")));
     assert!(!release.join("agents").exists());
@@ -802,7 +808,7 @@ fn snapshot_mcp_and_containment_keep_the_verified_target_and_argument_order() {
     .unwrap();
     let helper = std::path::Path::new("/app/resources/bin/buzz-agent-command");
     let command = process_command(
-        &target,
+        &Program::native(target.clone()),
         Some(helper),
         Some(&profile),
         &["--stdio".into()],
@@ -1234,4 +1240,38 @@ fn host_programs_never_load_an_appimage_bundle() {
             "{value}"
         );
     }
+}
+
+// An MSYS program behind the helper is quoted by the helper, which reads its
+// own arguments natively; one started directly is quoted here.
+#[test]
+#[cfg(windows)]
+fn msys_arguments_are_quoted_once_by_whoever_starts_the_program() {
+    let program = Program {
+        path: PathBuf::from(r"C:\Git\bin\bash.exe"),
+        msys: true,
+    };
+    let args = ["-c".to_owned(), r"\\server\share".to_owned()];
+    let helper = std::path::Path::new(r"C:\app\bin\buzz-agent-command.exe");
+    let through_helper = process_command(&program, Some(helper), None, &args[..1], &args[1..]);
+    assert_eq!(
+        through_helper.as_std().get_args().collect::<Vec<_>>(),
+        [
+            OsStr::new("--launch-msys"),
+            program.path.as_os_str(),
+            OsStr::new("-c"),
+            OsStr::new(r"\\server\share"),
+        ]
+    );
+    let direct = process_command(&program, None, None, &args[..1], &args[1..]);
+    assert_eq!(
+        direct.as_std().get_args().collect::<Vec<_>>(),
+        [OsStr::new(r#""-c""#), OsStr::new(r#""\\\\server\\share""#)]
+    );
+    let native = Program::native(program.path.clone());
+    let through_helper = process_command(&native, Some(helper), None, &args, &[]);
+    assert_eq!(
+        through_helper.as_std().get_args().next(),
+        Some(OsStr::new("--launch"))
+    );
 }

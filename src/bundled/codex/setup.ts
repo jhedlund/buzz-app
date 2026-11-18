@@ -9,6 +9,7 @@ import type {
   HostResponse,
 } from "../../features/host/service";
 import script from "./codex.sh?raw";
+import { scriptOptions, windowsMachine, WINDOWS_PWD } from "../git-bash";
 import { AppServer, listModels, needsSignIn, type Spawn } from "./rpc";
 
 export type CodexStatus =
@@ -29,6 +30,15 @@ const TARGETS: Readonly<Record<string, string>> = {
   "Linux aarch64": "aarch64-unknown-linux-musl",
   "Linux x86_64": "x86_64-unknown-linux-musl",
 };
+const WINDOWS_TARGETS: Readonly<Record<string, string>> = {
+  x86_64: "x86_64-pc-windows-msvc",
+  aarch64: "aarch64-pc-windows-msvc",
+  arm64: "aarch64-pc-windows-msvc",
+};
+export const targetOf = (uname: string) => {
+  const machine = windowsMachine(uname);
+  return machine ? WINDOWS_TARGETS[machine] : TARGETS[uname.trim()];
+};
 
 /** The `codex.sh` step, and its first arguments, behind each process the
  * plugin starts by name. */
@@ -47,15 +57,24 @@ const STEPS: Readonly<Record<string, readonly string[]>> = {
  * `read-from`, `login` and `review` as steps of `codex.sh`, which the manifest grants as `bash -c`; other
  * processes start as declared. */
 export const withScript =
-  (spawn: Spawn): Spawn =>
+  (spawn: Spawn, windows = false): Spawn =>
   (id, options) => {
     const step = STEPS[id];
-    return step
-      ? spawn("codex-sh", {
-          ...options,
-          args: [script, "codex.sh", ...step, ...(options?.args ?? [])],
-        })
-      : spawn(id, options);
+    if (step)
+      return spawn(
+        "codex-sh",
+        scriptOptions(
+          script,
+          "codex.sh",
+          [...step, ...(options?.args ?? [])],
+          options,
+          windows,
+        ),
+      );
+    // Windows names the folder as Codex there reads it.
+    if (windows && id === "workspace")
+      return spawn("codex-sh", { ...options, args: [WINDOWS_PWD] });
+    return spawn(id, options);
   };
 
 /** Runs a short process and returns its exit code and output. */
@@ -416,8 +435,7 @@ export class CodexSetup {
       throw new Error("releases.openai.com did not name a release");
     if (latest === current || this.refused.has(latest) || this.cancelled)
       return;
-    const target =
-      TARGETS[(await collect(spawn, "platform", [])).stdout.trim()];
+    const target = targetOf((await collect(spawn, "platform", [])).stdout);
     if (!target) throw new Error("Codex is not available for this computer");
     const asset = `codex-package-${target}.tar.gz`;
     const digest = release.assets?.find((item) => item.name === asset)?.digest;
