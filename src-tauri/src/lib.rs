@@ -77,6 +77,8 @@ mod microphone;
 mod mouse_nav;
 #[cfg(target_os = "macos")]
 mod reshow;
+#[cfg(windows)]
+mod tray;
 #[cfg(any(target_os = "macos", test))]
 mod webkit_reaper;
 
@@ -1071,6 +1073,12 @@ pub fn run() {
             mouse_nav::install(app.handle());
             #[cfg(target_os = "macos")]
             reshow::install(app.handle());
+            // Before any close hides the window: the icon is the way back.
+            // Without it, closing quits as before (see the close handler).
+            #[cfg(windows)]
+            if let Err(error) = tray::install(app.handle()) {
+                eprintln!("Could not add Buzz to the notification area: {error}");
+            }
             #[cfg(target_os = "macos")]
             webkit_reaper::install(app.handle());
             #[cfg(target_os = "macos")]
@@ -1352,6 +1360,18 @@ pub fn run() {
                         eprintln!("Could not close Buzz window: {error}");
                     } else {
                         reshow::closed();
+                    }
+                    return;
+                }
+            }
+            // As on macOS; the notification-area icon reopens and quits Buzz.
+            // Hide only when that icon exists, or the window could not come back.
+            #[cfg(windows)]
+            if window.label() == "main" && tray::installed(window.app_handle()) {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        eprintln!("Could not close Buzz window: {error}");
                     }
                     return;
                 }
