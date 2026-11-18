@@ -272,6 +272,43 @@ it("an older failure's Retry does nothing after a newer rename", async () => {
   expect(publish).toHaveBeenCalledTimes(2);
 });
 
+it("a failed rename's Retry does nothing once titles are off or the tab was renamed", async () => {
+  const publish = vi.fn(async (_event: RelayEvent): Promise<unknown> => {
+    throw new PublishRejected("Rejected", "relay unavailable");
+  });
+  const h = await harness({ title: "Launch plan", publish });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  const fail = async (name: string) => {
+    const before = toasts.notify.mock.calls.length;
+    act(() => h.item()?.rename?.(name));
+    await waitFor(() =>
+      expect(toasts.notify).toHaveBeenCalledTimes(before + 1),
+    );
+    return toasts.notify.mock.calls[before]?.[2];
+  };
+  publish.mockResolvedValue("");
+  publish.mockRejectedValueOnce(new Error("relay unavailable"));
+  // Shared titles switched off: Retry publishes nothing.
+  const whileOff = await fail("Ship plan");
+  act(() => disable?.());
+  act(() => whileOff?.onClick());
+  // A local rename while off, then back on: the old Retry stays retired.
+  act(() => h.item()?.rename?.("Mine"));
+  act(() => {
+    disable = enableThreadTitles();
+  });
+  act(() => whileOff?.onClick());
+  expect(h.localName()).toBe("Mine");
+  // A blank rename retires it too.
+  act(() => h.item()?.rename?.(""));
+  publish.mockRejectedValueOnce(new Error("relay unavailable"));
+  const beforeBlank = await fail("Ship plan");
+  act(() => h.item()?.rename?.(""));
+  act(() => beforeBlank?.onClick());
+  expect(publish).toHaveBeenCalledTimes(2);
+  expect(h.localName()).toBeFalsy();
+});
+
 it("a name over the byte limit says so and changes nothing", async () => {
   const h = await harness({ title: "Launch plan" });
   await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));

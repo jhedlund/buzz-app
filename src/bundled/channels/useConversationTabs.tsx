@@ -813,6 +813,13 @@ export function useConversationTabs({
   // write drops it, so it can't hide the shared title, and says so. A blank
   // name only drops the local one.
   function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
+    // Any rename, local or shared, retires an earlier rename's pending Retry.
+    const bump = () => {
+      const id = (renames.current.get(tab.id) ?? 0) + 1;
+      renames.current.set(tab.id, id);
+      return id;
+    };
+    bump();
     if (!threadTitlesEnabled()) return tabState.renameTab(tab.id, name);
     const rootId = rootOfTab(tab);
     const read = queries.snapshotRead;
@@ -831,8 +838,7 @@ export function useConversationTabs({
     // can never replace a title someone else set meanwhile.
     const expected = store.get(tab.channelId, rootId)?.revision;
     const save = () => {
-      const id = (renames.current.get(tab.id) ?? 0) + 1;
-      renames.current.set(tab.id, id);
+      const id = bump();
       const latest = () => renames.current.get(tab.id) === id;
       tabState.renameTab(tab.id, desired);
       writeTitle(
@@ -864,7 +870,10 @@ export function useConversationTabs({
             "error",
             cause instanceof TitleConflict
               ? undefined
-              : { label: "Retry", onClick: () => latest() && save() },
+              : {
+                  label: "Retry",
+                  onClick: () => latest() && threadTitlesEnabled() && save(),
+                },
           );
         },
       );
