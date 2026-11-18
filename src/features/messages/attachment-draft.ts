@@ -16,6 +16,8 @@ export type DraftAttachment = Readonly<{
   file: File;
   voice?: UploadedAttachment["voice"];
   status: "queued" | "preparing" | "uploading" | "ready" | "error";
+  /** Kept on this device until the message is sent; never uploaded eagerly. */
+  onSend?: true;
   uploaded?: UploadedAttachment;
   error?: string | undefined;
   /** Host-reported bytes for the current prepared transfer. */
@@ -27,7 +29,11 @@ export type AttachmentDraft = {
   /** Admits the files that fit, in order. A lone file that does not fit throws
    * why; otherwise one sentence per reason names the first files left out
    * and counts the rest. */
-  add(files: readonly File[], recording?: VoiceRecording): readonly string[];
+  add(
+    files: readonly File[],
+    recording?: VoiceRecording,
+    options?: Readonly<{ onSend?: boolean }>,
+  ): readonly string[];
   addUploaded(attachment: UploadedAttachment): void;
   adopt(files: readonly DraftAttachment[]): boolean;
   prepareForSend(signal: AbortSignal): Promise<readonly UploadedAttachment[]>;
@@ -189,20 +195,22 @@ export function attachmentDraft(
     for (const task of active.values()) task.controller.abort();
     active.clear();
     pending.clear();
-    items = items.map((item) =>
-      item.status === "queued" ||
-      item.status === "preparing" ||
-      item.status === "uploading"
-        ? {
-            ...item,
-            status: retryRequired ? "error" : "queued",
-            error: retryRequired
-              ? "Upload paused. Retry to continue."
-              : undefined,
-            transfer: undefined,
-          }
-        : item,
-    );
+    items = items.map((item): DraftAttachment => {
+      if (
+        item.status !== "queued" &&
+        item.status !== "preparing" &&
+        item.status !== "uploading"
+      )
+        return item;
+      // Held files only upload on Send, so the next Send is their retry.
+      const retry = retryRequired && !item.onSend;
+      return {
+        ...item,
+        status: retry ? "error" : "queued",
+        error: retry ? "Upload paused. Retry to continue." : undefined,
+        transfer: undefined,
+      };
+    });
     emit();
   }
   function abortReason(signal: AbortSignal) {
@@ -301,7 +309,7 @@ export function attachmentDraft(
   }
   function pump() {
     if (paused || active.size) return;
-    const next = items.find((item) => item.status === "queued");
+    const next = items.find((item) => item.status === "queued" && !item.onSend);
     if (next) start(next);
   }
   function start(item: DraftAttachment, signal = new AbortController().signal) {
@@ -336,7 +344,11 @@ export function attachmentDraft(
         }
       };
     },
-    add(files: readonly File[], recording?: VoiceRecording) {
+    add(
+      files: readonly File[],
+      recording?: VoiceRecording,
+      options?: Readonly<{ onSend?: boolean }>,
+    ) {
       if (recording) {
         validateRecording(recording);
         if (files.length !== 1 || files[0] !== recording.file)
@@ -389,6 +401,7 @@ export function attachmentDraft(
             id: crypto.randomUUID(),
             file,
             status: "queued",
+            ...(options?.onSend ? { onSend: true as const } : {}),
             ...(recording
               ? {
                   voice: {

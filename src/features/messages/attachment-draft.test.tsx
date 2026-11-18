@@ -654,6 +654,27 @@ it("rejects eager upload errors until explicit Retry, including after Send hando
   await expect(work).resolves.toEqual([uploaded()]);
 });
 
+it("a failed Send leaves held files waiting for the next Send, not Retry", async () => {
+  const h = fixture();
+  const store = attachmentDraft(h.session, "held", "one");
+  const stop = store.subscribe(() => {});
+  store.add([file("eager.txt")]);
+  store.add([file("held.txt")], undefined, { onSend: true });
+  await waitFor(() => expect(h.calls).toHaveLength(1));
+  const work = store.prepareForSend(new AbortController().signal);
+  h.calls[0]?.result.reject(new Error("relay down"));
+  await expect(work).rejects.toThrow("relay down");
+  expect(
+    store.snapshot().map(({ status, error }) => ({ status, error })),
+  ).toEqual([
+    { status: "error", error: "relay down" },
+    { status: "queued", error: undefined },
+  ]);
+  store.resume();
+  expect(h.calls).toHaveLength(1);
+  stop();
+});
+
 it("a new chat's draft uploads before its channel exists", async () => {
   const h = fixture();
   const uploadForNewChat = vi.fn(
