@@ -23,10 +23,14 @@ export function TitleAccessory({
       size="sm"
       data-thread-title=""
       aria-label={`Open thread: ${title.title}`}
+      title={title.title}
       onClick={() => openThread()}
     >
       <MessageReplyIcon size="1rem" aria-hidden="true" />
-      <span className="text-body-sm">{title.title}</span>
+      {/* One line, however long the title someone set. */}
+      <span className="max-w-[min(60ch,60vw)] truncate text-body-sm">
+        {title.title}
+      </span>
     </Button>
   );
 }

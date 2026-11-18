@@ -6,7 +6,8 @@
 //
 // Relay reads per session: ceil(joined/100) current reads when the first
 // reader subscribes and whenever the joined set changes, then one read per
-// burst of title changes. Following adds no subscriptions: the live routes
+// burst of title changes. A failed read is retried after a jittered delay that
+// doubles up to a cap. Following adds no subscriptions: the live routes
 // already carry the joined channels.
 import { useSyncExternalStore } from "react";
 import type { RelaySession } from "../relay/session";
@@ -19,6 +20,14 @@ import {
 
 /** A burst of title changes waits this long, then reads its channels once. */
 const TITLE_DEBOUNCE_MS = 300;
+/** A failed read waits this long, doubling per failure up to the cap. */
+const RETRY_BASE_MS = 5_000;
+const RETRY_CAP_MS = 5 * 60_000;
+/** Spread to [0.5, 1.5) of the delay, so clients that failed together don't
+ * retry together. */
+export const retryDelay = (failures: number, random = Math.random) =>
+  Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_CAP_MS) *
+  (0.5 + random());
 
 export type ThreadTitles = Readonly<{
   /** By activityKey(channel, root); undefined until the first read settles. */
@@ -32,8 +41,6 @@ export type ThreadTitleStore = Readonly<{
   snapshot(): ThreadTitles;
   subscribe(listener: () => void): () => void;
   get(channelId: string, rootId: string): ThreadTitle | undefined;
-  /** Reads every joined channel again. */
-  refresh(): void;
   /** A write this client made, shown before the relay's echo is re-read. */
   apply(
     channelId: string,
@@ -105,14 +112,20 @@ export function useThreadTitles(session: Session) {
   );
 }
 
+/** One thread's title. A row rerenders only when its own title changes. */
 export function useThreadTitle(
   session: Session,
   channelId: string,
   rootId: string,
 ) {
-  return useThreadTitles(session).titles?.get(
-    activityKey(channelId, rootId.toLowerCase()),
+  const store = threadTitleStore(session);
+  const on = useSyncExternalStore(
+    subscribeSwitch,
+    threadTitlesEnabled,
+    threadTitlesEnabled,
   );
+  const get = () => (on ? store.get(channelId, rootId) : undefined);
+  return useSyncExternalStore(on ? store.subscribe : idle, get, get);
 }
 
 function createStore(session: Session): ThreadTitleStore {
@@ -146,6 +159,9 @@ function createStore(session: Session): ThreadTitleStore {
     const { signal } = controller;
     const stale = new Set<string>();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const failed = new Set<string>();
     let reading = false;
     let partial = new Set<string>();
     const run = (channels: readonly string[], first: boolean) => {
@@ -166,10 +182,21 @@ function createStore(session: Session): ThreadTitleStore {
             first ? [] : [...partial].filter((c) => !channels.includes(c)),
           );
           if (found.partial) for (const c of channels) partial.add(c);
+          for (const c of channels) failed.delete(c);
+          if (!failed.size) failures = 0;
           set({ titles, partial: partial.size > 0, error: undefined });
         })
         .catch((cause) => {
           if (signal.aborted) return;
+          // Failed channels are read again after a backoff.
+          for (const c of channels) failed.add(c);
+          failures += 1;
+          clearTimeout(retry);
+          retry = setTimeout(() => {
+            for (const c of failed) stale.add(c);
+            failed.clear();
+            flush();
+          }, retryDelay(failures));
           set({
             ...(!state.titles && { titles: new Map() }),
             error: cause instanceof Error ? cause.message : String(cause),
@@ -202,6 +229,7 @@ function createStore(session: Session): ThreadTitleStore {
     stopRun = () => {
       controller.abort();
       clearTimeout(timer);
+      clearTimeout(retry);
       stopFollow();
     };
   };
@@ -248,11 +276,6 @@ function createStore(session: Session): ThreadTitleStore {
     },
     get: (channelId, rootId) =>
       state.titles?.get(activityKey(channelId, rootId.toLowerCase())),
-    refresh() {
-      if (!listeners.size) return;
-      close();
-      open();
-    },
     apply(channelId, rootId, title) {
       const titles = new Map(state.titles);
       const key = activityKey(channelId, rootId.toLowerCase());

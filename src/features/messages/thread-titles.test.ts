@@ -72,6 +72,9 @@ describe("convention", () => {
     expect(normalizeTitle("   ")).toBeUndefined();
     expect(normalizeTitle("é".repeat(256))).toBe("é".repeat(256));
     expect(() => normalizeTitle("é".repeat(257))).toThrow("512 bytes");
+    // A typed title is one line of plain text, too.
+    expect(normalizeTitle(" Launch\n\tplan\u202e ")).toBe("Launch plan");
+    expect(normalizeTitle("\u2066\u200f")).toBeUndefined();
   });
 
   it("plans the SDK's lifecycle", () => {
@@ -144,6 +147,27 @@ describe("convention", () => {
         ]),
       ),
     ).toBeUndefined();
+  });
+
+  it("makes another writer's title safe to show", async () => {
+    const shown = async (title: string) =>
+      parseTitle(await titleEvent("e1", title))?.title;
+    // Line breaks, controls and separators become one space; bidi
+    // formatting (overrides, isolates, marks) is removed.
+    expect(await shown("Launch\r\n\n plan\u0000\u2028done")).toBe(
+      "Launch plan done",
+    );
+    expect(await shown("\u202eevil\u202c \u2067x\u2069\u200e\u061c")).toBe(
+      "evil x",
+    );
+    // Emoji sequences keep their joiners.
+    expect(await shown("👩‍💻 plan")).toBe("👩‍💻 plan");
+    // Over the byte limit is cut at a code point boundary, not rejected.
+    const long = await shown(`${"a".repeat(511)}😀tail`);
+    expect(long).toBe("a".repeat(511));
+    expect(await shown(`${"é".repeat(300)}`)).toBe("é".repeat(256));
+    // Nothing left to show is no title.
+    expect(await shown("\u202e\n\u2066 ")).toBeUndefined();
   });
 });
 
@@ -315,6 +339,29 @@ describe("reads", () => {
     expect(most).toBe(4);
     release();
     expect((await done).size).toBe(6);
+  });
+
+  it("reports a read that fills its page as partial", async () => {
+    const full = await Promise.all(
+      Array.from({ length: 500 }, (_, i) =>
+        titleEvent(`e${i}`, `Title ${i}`, {
+          root: i.toString(16).padStart(64, "0"),
+        }),
+      ),
+    );
+    const result = await readTitles(
+      async () => full,
+      [CHANNEL],
+      new AbortController().signal,
+    );
+    expect(result.partial).toBe(true);
+    expect(result.titles).toHaveLength(500);
+    const under = await readTitles(
+      async () => full.slice(1),
+      [CHANNEL],
+      new AbortController().signal,
+    );
+    expect(under.partial).toBe(false);
   });
 });
 

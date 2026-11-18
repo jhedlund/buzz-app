@@ -3,6 +3,7 @@ import type { ReadFilter, RelayEvent } from "../relay/events";
 import type { RelaySession } from "../relay/session";
 import {
   enableThreadTitles,
+  retryDelay,
   threadTitlesEnabled,
   threadTitleStore,
 } from "./thread-title-store";
@@ -124,18 +125,57 @@ describe("thread title store", () => {
     stop();
   });
 
-  it("keeps the titles it has and reports a failed re-read", async () => {
-    const f = fixture([await head("e1", "Launch plan")]);
-    const store = threadTitleStore(f.session);
-    const stop = store.subscribe(() => {});
-    await vi.waitFor(() => expect(store.get(ALPHA, ROOT)).toBeDefined());
-    f.snapshotRead.mockRejectedValueOnce(new Error("Relay offline"));
-    store.refresh();
-    await vi.waitFor(() =>
-      expect(store.snapshot().error).toBe("Relay offline"),
-    );
-    expect(store.get(ALPHA, ROOT)?.title).toBe("Launch plan");
-    stop();
+  it("reports a failed read and retries it after a backoff", async () => {
+    // Only timers are faked: reads settle through real crypto and promises.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    const until = async (done: () => boolean) => {
+      for (let i = 0; i < 100 && !done(); i++) await tick();
+      expect(done()).toBe(true);
+    };
+    try {
+      const f = fixture([await head("e1", "Launch plan")]);
+      f.snapshotRead.mockRejectedValueOnce(new Error("Relay offline"));
+      const store = threadTitleStore(f.session);
+      const stop = store.subscribe(() => {});
+      await until(() => store.snapshot().error === "Relay offline");
+      expect(store.snapshot().titles?.size).toBe(0);
+      vi.advanceTimersByTime(4_999);
+      await tick();
+      expect(f.snapshotRead).toHaveBeenCalledTimes(1);
+      // The second failure waits twice as long; existing titles stay.
+      f.snapshotRead.mockRejectedValueOnce(new Error("Still offline"));
+      vi.advanceTimersByTime(1);
+      await until(() => store.snapshot().error === "Still offline");
+      expect(f.snapshotRead).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(9_999);
+      await tick();
+      expect(f.snapshotRead).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(1);
+      await until(() => store.get(ALPHA, ROOT)?.title === "Launch plan");
+      expect(store.snapshot().error).toBeUndefined();
+      expect(f.snapshotRead.mock.calls[2]?.[0][0]?.["#h"]).toEqual([ALPHA]);
+      // Leaving stops a pending retry.
+      f.snapshotRead.mockRejectedValueOnce(new Error("Offline again"));
+      f.changeList([ALPHA, BETA]);
+      await until(() => store.snapshot().error === "Offline again");
+      stop();
+      vi.advanceTimersByTime(60_000);
+      await tick();
+      expect(f.snapshotRead).toHaveBeenCalledTimes(4);
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("spreads and caps the retry delay", () => {
+    expect(retryDelay(1, () => 0)).toBe(2_500);
+    expect(retryDelay(1, () => 0.5)).toBe(5_000);
+    expect(retryDelay(3, () => 0.5)).toBe(20_000);
+    expect(retryDelay(30, () => 0.5)).toBe(300_000);
+    expect(retryDelay(30, () => 0.999)).toBeLessThan(450_000);
   });
 
   it("is empty and inert without a snapshot reader", () => {

@@ -58,6 +58,7 @@ import {
   type TabPane,
   type useChannelTabState,
 } from "./useChannelTabState";
+import { useToastNotification } from "../../shared/design-system/ui/Toast";
 import styles from "./Channels.module.css";
 import tabStyles from "./ChannelTabs.module.css";
 
@@ -786,6 +787,7 @@ export function useConversationTabs({
   // A device-local name wins, then the thread's shared title. Several open
   // threads stay distinguishable by their original message.
   const sharedTitles = useThreadTitles(queries).titles;
+  const notify = useToastNotification();
   function threadLabel(tab: Extract<Tab, { kind: "thread" }>, name?: string) {
     if (tab.name) return tab.name;
     const rootId = rootOfTab(tab);
@@ -803,8 +805,9 @@ export function useConversationTabs({
     return text || (name ? `Thread · ${name}` : "Thread");
   }
   // With shared titles on, renaming a thread tab names the thread for
-  // everyone. The typed name shows on this tab until the write lands, and
-  // stays there if it fails. A blank name only drops the local one.
+  // everyone. The typed name shows on this tab until the write lands. A failed
+  // write drops it, so it can't hide the shared title, and says so with a
+  // retry. A blank name only drops the local one.
   function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
     if (!threadTitlesEnabled()) return tabState.renameTab(tab.id, name);
     const rootId = rootOfTab(tab);
@@ -813,8 +816,9 @@ export function useConversationTabs({
     let desired: string | undefined;
     try {
       desired = normalizeTitle(name);
-    } catch {
-      return tabState.renameTab(tab.id, name);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : String(cause), "error");
+      return;
     }
     if (!desired) return tabState.renameTab(tab.id, "");
     if (!read || !writer) return tabState.renameTab(tab.id, desired);
@@ -844,11 +848,12 @@ export function useConversationTabs({
         tabState.renameTab(tab.id, "");
       },
       (cause) => {
-        console.warn(
-          "Couldn't save the thread title; kept it on this tab",
-          cause,
-        );
-        tabState.renameTab(tab.id, title);
+        tabState.renameTab(tab.id, "");
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        notify(`Couldn’t save the thread title. ${reason}`, "error", {
+          label: "Retry",
+          onClick: () => renameThread(tab, title),
+        });
       },
     );
   }

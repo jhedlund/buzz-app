@@ -30,13 +30,46 @@ const REPLY_KINDS = [9, 40002, 45003];
 export const threadTitleId = (root: string) =>
   uuidv5(THREAD_TITLE_NAMESPACE, `${THREAD_TITLE_TYPE}:${root.toLowerCase()}`);
 
-/** Trimmed title, or undefined when blank (clearing is its own operation). */
+// A title is one line of plain text shown inside other people's rows: no
+// control or line-separator characters, and no bidi formatting characters,
+// which could reorder the row's text around it.
+const BREAKS = /[\p{Cc}\u2028\u2029]/gu;
+const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+
+/** One line: breaks and controls become spaces, bidi formatting goes, runs
+ * of whitespace collapse, and the ends are trimmed. */
+export function cleanTitle(title: string) {
+  return title
+    .replace(BIDI, "")
+    .replace(BREAKS, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const bytes = (text: string) => new TextEncoder().encode(text).length;
+
+/** Cleaned title, or undefined when blank (clearing is its own operation). */
 export function normalizeTitle(title: string) {
-  const trimmed = title.trim();
-  if (!trimmed) return undefined;
-  if (new TextEncoder().encode(trimmed).length > MAX_THREAD_TITLE_BYTES)
+  const cleaned = cleanTitle(title);
+  if (!cleaned) return undefined;
+  if (bytes(cleaned) > MAX_THREAD_TITLE_BYTES)
     throw new Error(`Titles can be at most ${MAX_THREAD_TITLE_BYTES} bytes.`);
-  return trimmed;
+  return cleaned;
+}
+
+/** A title as another client published it, made safe to show: cleaned, and
+ * cut to the byte limit at a code point boundary. */
+export function displayTitle(title: string) {
+  const cleaned = cleanTitle(title);
+  if (bytes(cleaned) <= MAX_THREAD_TITLE_BYTES) return cleaned || undefined;
+  let out = "";
+  let used = 0;
+  for (const char of cleaned) {
+    used += bytes(char);
+    if (used > MAX_THREAD_TITLE_BYTES) break;
+    out += char;
+  }
+  return out.trimEnd() || undefined;
 }
 
 const tag = (event: EventData, name: string) =>
@@ -51,11 +84,12 @@ export type ThreadTitle = Readonly<{
   updatedAt: number;
 }>;
 
-/** A live title, or undefined for other types, deletions or malformed events. */
+/** A live title, or undefined for other types, deletions or malformed events.
+ * Writers other than this client aren't bound by normalizeTitle, so the title
+ * is made safe to show here, for every consumer. */
 export function parseTitle(event: EventData): ThreadTitle | undefined {
-  const [title, channel, root] = ["title", "h", "root"].map((t) =>
-    tag(event, t),
-  );
+  const [raw, channel, root] = ["title", "h", "root"].map((t) => tag(event, t));
+  const title = raw && displayTitle(raw);
   if (
     event.kind !== ARTIFACT_KIND ||
     tag(event, "type") !== THREAD_TITLE_TYPE ||

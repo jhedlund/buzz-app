@@ -11,10 +11,24 @@ import type { RelaySession } from "../../features/relay/session";
 import { channelTabs, useChannelTabState } from "./useChannelTabState";
 import { useConversationTabs } from "./useConversationTabs";
 
+const toasts = vi.hoisted(() => ({
+  notify: vi.fn<
+    (
+      title: string,
+      tone: string,
+      action?: { label: string; onClick(): void },
+    ) => string
+  >(() => ""),
+}));
+vi.mock("../../shared/design-system/ui/Toast", () => ({
+  useToastNotification: () => toasts.notify,
+}));
+
 // The Named threads plugin turns shared titles on while it runs.
 let disable: (() => void) | undefined;
 beforeEach(() => {
   disable = enableThreadTitles();
+  toasts.notify.mockClear();
 });
 afterEach(() => {
   cleanup();
@@ -162,24 +176,46 @@ it("renaming against a titled thread updates it from the shown revision", async 
   expect(h.item()?.label).toBe("Ship plan");
 });
 
-it("keeps the typed name on the tab when the shared write fails", async () => {
-  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-  const h = await harness({
-    publish: vi.fn(async () => {
-      throw new PublishRejected("Rejected", "restricted: not a member");
-    }),
+it("a failed shared write drops the typed name and offers a retry", async () => {
+  const publish = vi.fn(async (_event: RelayEvent): Promise<unknown> => {
+    throw new PublishRejected("Rejected", "restricted: not a member");
   });
-  await waitFor(() => expect(h.snapshotRead).toHaveBeenCalled());
-  act(() => h.item()?.rename?.("Launch plan"));
-  await waitFor(() => expect(warn).toHaveBeenCalled());
-  expect(h.localName()).toBe("Launch plan");
+  const h = await harness({ title: "Launch plan", publish });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("Ship plan"));
+  expect(h.item()?.label).toBe("Ship plan");
+  await waitFor(() => expect(toasts.notify).toHaveBeenCalledOnce());
+  const [message, tone, action] = toasts.notify.mock.calls[0] ?? [];
+  expect(message).toMatch(/^Couldn’t save the thread title\./);
+  expect(tone).toBe("error");
+  expect(action?.label).toBe("Retry");
+  // The local name can't hide the shared title once the write failed.
+  expect(h.localName()).toBeFalsy();
   expect(h.item()?.label).toBe("Launch plan");
-  // Over the byte limit never reaches the relay and stays local too.
-  const long = "x".repeat(513);
-  act(() => h.item()?.rename?.(long));
-  expect(h.localName()).toBe(long);
-  expect(h.publish).toHaveBeenCalledTimes(1);
-  warn.mockRestore();
+  // Retry writes the same name again, and this time it lands.
+  publish.mockResolvedValueOnce("");
+  act(() => action?.onClick());
+  expect(h.item()?.label).toBe("Ship plan");
+  await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(h.localName()).toBeFalsy());
+  expect(h.item()?.label).toBe("Ship plan");
+  expect(publish.mock.calls[1]?.[0].tags).toContainEqual([
+    "title",
+    "Ship plan",
+  ]);
+});
+
+it("a name over the byte limit says so and changes nothing", async () => {
+  const h = await harness({ title: "Launch plan" });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("x".repeat(513)));
+  expect(toasts.notify).toHaveBeenCalledWith(
+    "Titles can be at most 512 bytes.",
+    "error",
+  );
+  expect(h.localName()).toBeFalsy();
+  expect(h.item()?.label).toBe("Launch plan");
+  expect(h.publish).not.toHaveBeenCalled();
 });
 
 it("an empty rename clears only the local name, never the shared title", async () => {
