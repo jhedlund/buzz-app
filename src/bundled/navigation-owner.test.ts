@@ -47,6 +47,7 @@ it("gives every bundled page to the app whose navigation lists it", async () => 
     // Pages listed in the Messages sidebar keep Messages selected.
     "buzz.drafts-and-sent/drafts-sent": messages,
     "buzz.inbox/inbox": messages,
+    "buzz.threads/threads": messages,
     // Dock apps own themselves.
     "buzz.bestie/bestie": "buzz.bestie/bestie",
     "buzz.reminders/reminders": "buzz.reminders/reminders",

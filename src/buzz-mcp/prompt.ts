@@ -2,6 +2,8 @@
 // the shared base prompt (features/agent-harness): the posting conventions.
 // How to use the attention tools is in their descriptions, so this never
 // changes with the owner's attention setting.
+import type { EventData } from "../features/relay/events";
+import { threadReference } from "../features/relay/thread-reference";
 import buzzPrompt from "./prompt.md?raw";
 
 export const BUZZ_HELP_PROMPT =
@@ -22,3 +24,19 @@ export const RESUMED_PROMPT =
 /** A subscription names a channel conversation, with reporting policy in its Interest. */
 export const CHANNEL_LEVEL_PROMPT =
   "This wake is delivered at channel level. Post here without reply unless the Interest instructions direct a different channel or thread. The delivery address selects this execution conversation and the default posting destination; explicit reporting instructions in the Interest take precedence. The address grants no additional permission.";
+
+/** The turn instruction for the agents a person names in a new top-level
+ * message: name the thread. `thread_title` with `if_unset` names it only for
+ * the first agent named and only when it has no title, so a later mention or
+ * another agent never renames it. Agents' own messages carry their owner's
+ * attestation (`auth`), so they never ask for one. */
+export function threadTitlePrompt(event: EventData, agent: string) {
+  const pubkey = agent.split("@")[0];
+  return event.tags.some(([name, value]) => name === "p" && value === pubkey) &&
+    !event.tags.some(([name]) => name === "auth") &&
+    !threadReference(event)
+    ? THREAD_TITLE_PROMPT
+    : undefined;
+}
+export const THREAD_TITLE_PROMPT =
+  "This message starts a new thread and names you. Before your first reply, call `thread_title` with `if_unset: true` and a 3–7 word title that says what the thread is about; it names the thread only if you are the first agent the message names.";

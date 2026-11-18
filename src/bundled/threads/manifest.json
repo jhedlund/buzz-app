@@ -1,0 +1,7 @@
+{
+  "id": "buzz.threads",
+  "name": "Named threads",
+  "apiVersion": 1,
+  "description": "Browse, rename and clear titled threads across your channels. Titles are shared with everyone in the channel, including agents.",
+  "discovery": { "category": "communication", "tags": ["messaging"] }
+}

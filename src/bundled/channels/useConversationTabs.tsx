@@ -22,6 +22,17 @@ import { useTabDrag } from "../../features/panels/useTabDrag";
 import { PanelMediaCard } from "./PanelMediaCard";
 import type { MessageLinkOrigin } from "../../features/messages/MessageRow";
 import {
+  threadTitlesEnabled,
+  threadTitleStore,
+  useThreadTitles,
+} from "../../features/messages/thread-title-store";
+import {
+  activityKey,
+  normalizeTitle,
+  TitleConflict,
+  writeTitle,
+} from "../../features/messages/thread-titles";
+import {
   BrowserIcon,
   ThreadIcon,
   InfoIcon,
@@ -48,6 +59,7 @@ import {
   type TabPane,
   type useChannelTabState,
 } from "./useChannelTabState";
+import { useToastNotification } from "../../shared/design-system/ui/Toast";
 import styles from "./Channels.module.css";
 import tabStyles from "./ChannelTabs.module.css";
 
@@ -775,10 +787,18 @@ export function useConversationTabs({
       linkedThread.current(channelId, messageId, rootId),
     [],
   );
-  // Several open threads stay distinguishable by their original message.
+  // A device-local name wins, then the thread's shared title. Several open
+  // threads stay distinguishable by their original message.
+  const sharedTitles = useThreadTitles(queries).titles;
+  const notify = useToastNotification();
+  // The latest shared rename per tab: an older write's outcome or Retry
+  // must not undo a newer one.
+  const renames = useRef(new Map<string, number>());
   function threadLabel(tab: Extract<Tab, { kind: "thread" }>, name?: string) {
     if (tab.name) return tab.name;
     const rootId = rootOfTab(tab);
+    const shared = sharedTitles?.get(activityKey(tab.channelId, rootId));
+    if (shared) return shared.title;
     const root = queries.channels
       .window(tab.channelId)
       .rows.find((row) => row.id === rootId);
@@ -789,6 +809,83 @@ export function useConversationTabs({
       .trim()
       .slice(0, 80);
     return text || (name ? `Thread · ${name}` : "Thread");
+  }
+  // With shared titles on, renaming a thread tab names the thread for
+  // everyone. The typed name shows on this tab until the write lands. A failed
+  // write drops it, so it can't hide the shared title, and says so. A blank
+  // name only drops the local one.
+  function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
+    // Any accepted rename, local or shared, retires an earlier rename's
+    // pending outcome and Retry; a rejected one leaves them alone.
+    const bump = () => {
+      const id = (renames.current.get(tab.id) ?? 0) + 1;
+      renames.current.set(tab.id, id);
+      return id;
+    };
+    if (!threadTitlesEnabled()) {
+      bump();
+      return tabState.renameTab(tab.id, name);
+    }
+    const rootId = rootOfTab(tab);
+    const read = queries.snapshotRead;
+    const writer = queries.configArtifactWriter;
+    let desired: string | undefined;
+    try {
+      desired = normalizeTitle(name);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : String(cause), "error");
+      return;
+    }
+    if (!desired || !read || !writer) {
+      bump();
+      return tabState.renameTab(tab.id, desired ?? "");
+    }
+    const store = threadTitleStore(queries);
+    // Retry writes against the revision this rename was typed over, so it
+    // can never replace a title someone else set meanwhile.
+    const expected = store.get(tab.channelId, rootId)?.revision;
+    const save = () => {
+      const id = bump();
+      const latest = () => renames.current.get(tab.id) === id;
+      tabState.renameTab(tab.id, desired);
+      writeTitle(
+        read,
+        writer,
+        { channel: tab.channelId, root: rootId, revision: expected },
+        desired,
+        AbortSignal.timeout(20_000),
+      ).then(
+        (revision) => {
+          if (revision)
+            store.apply(tab.channelId, rootId, {
+              title: desired,
+              channel: tab.channelId,
+              root: rootId.toLowerCase(),
+              revision,
+              updatedAt: Math.floor(Date.now() / 1000),
+            });
+          if (latest()) tabState.renameTab(tab.id, "");
+        },
+        (cause) => {
+          if (!latest()) return;
+          tabState.renameTab(tab.id, "");
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          // After a conflict the tab shows the current title; renaming again
+          // writes over that one.
+          notify(
+            `Couldn’t save the thread title. ${reason}`,
+            "error",
+            cause instanceof TitleConflict
+              ? undefined
+              : {
+                  label: "Retry",
+                  onClick: () => latest() && threadTitlesEnabled() && save(),
+                },
+          );
+        },
+      );
+    };
+    save();
   }
   // The current conversation's own threads are already in its channel.
   function openInChannel(tab: Tab, target: ChannelSummary | undefined) {
@@ -850,7 +947,7 @@ export function useConversationTabs({
       ...(tab.kind === "thread" && {
         attentionRequest: tab.attentionRequest,
         move: (delta: -1 | 1) => moveBy(tab, delta),
-        rename: (name: string) => tabState.renameTab(tab.id, name),
+        rename: (name: string) => renameThread(tab, name),
       }),
       ...(openChannel && {
         actions: [{ label: "Open in channel", run: openChannel }],

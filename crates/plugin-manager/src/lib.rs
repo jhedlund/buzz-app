@@ -579,6 +579,8 @@ fn bundled_manifests_for(gateway: Option<&gateway::Native>) -> Vec<Manifest> {
             "../../../src/bundled/changesets/manifest.json"
         ))
         .expect("changesets manifest"),
+        serde_json::from_str(include_str!("../../../src/bundled/threads/manifest.json"))
+            .expect("threads manifest"),
     ]
     .into_iter()
     .map(|manifest| gateway_grant(manifest, gateway))
@@ -604,6 +606,7 @@ fn enabled_by_default(id: &str) -> bool {
             | "buzz.watching"
             | "buzz.pairing"
             | "buzz.inbox"
+            | "buzz.threads"
             | "buzz.repos"
             | "buzz.agents"
             | "buzz.claude-code"
