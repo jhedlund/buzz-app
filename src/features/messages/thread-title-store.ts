@@ -41,6 +41,8 @@ export type ThreadTitleStore = Readonly<{
   snapshot(): ThreadTitles;
   subscribe(listener: () => void): () => void;
   get(channelId: string, rootId: string): ThreadTitle | undefined;
+  /** Reads every joined channel again. */
+  refresh(): void;
   /** A write this client made, shown before the relay's echo is re-read. */
   apply(
     channelId: string,
@@ -120,7 +122,7 @@ export function useThreadTitle(
 ) {
   const store = threadTitleStore(session);
   const on = useSyncExternalStore(
-    subscribeSwitch,
+    subscribeThreadTitlesSwitch,
     threadTitlesEnabled,
     threadTitlesEnabled,
   );
@@ -282,6 +284,11 @@ function createStore(session: Session): ThreadTitleStore {
     },
     get: (channelId, rootId) =>
       state.titles?.get(activityKey(channelId, rootId.toLowerCase())),
+    refresh() {
+      if (!listeners.size) return;
+      close();
+      open();
+    },
     apply(channelId, rootId, title) {
       const titles = new Map(state.titles);
       const key = activityKey(channelId, rootId.toLowerCase());

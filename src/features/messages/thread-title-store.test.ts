@@ -125,6 +125,20 @@ describe("thread title store", () => {
     stop();
   });
 
+  it("keeps the titles it has and reports a failed re-read", async () => {
+    const f = fixture([await head("e1", "Launch plan")]);
+    const store = threadTitleStore(f.session);
+    const stop = store.subscribe(() => {});
+    await vi.waitFor(() => expect(store.get(ALPHA, ROOT)).toBeDefined());
+    f.snapshotRead.mockRejectedValueOnce(new Error("Relay offline"));
+    store.refresh();
+    await vi.waitFor(() =>
+      expect(store.snapshot().error).toBe("Relay offline"),
+    );
+    expect(store.get(ALPHA, ROOT)?.title).toBe("Launch plan");
+    stop();
+  });
+
   it("reports a failed read and retries it after a backoff", async () => {
     // Only timers are faked: reads settle through real crypto and promises.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

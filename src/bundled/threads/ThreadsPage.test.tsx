@@ -603,7 +603,11 @@ it("clears a failed automatic re-read's error once a later one succeeds", async 
   f.relay.heads = f.relay.heads.map((head) =>
     head.id === "e2" ? renamed : head,
   );
-  act(() => f.live.titles?.([renamed]));
+  // A failed channel waits out its backoff (thread-title-store); Refresh
+  // reads it at once.
+  await userEvent.click(
+    screen.getByRole("button", { name: "Refresh threads" }),
+  );
   await waitFor(async () => expect(await rows()).toContain("Bug boardbeta"));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
