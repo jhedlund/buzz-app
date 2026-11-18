@@ -495,11 +495,7 @@ export function MentionPicker({
                             session.media,
                           )}
                           size="large"
-                          shape={
-                            agent || !members?.includes(recipient.pubkey)
-                              ? "squircle"
-                              : "circle"
-                          }
+                          shape={agent ? "squircle" : "circle"}
                         />
                       }
                     />

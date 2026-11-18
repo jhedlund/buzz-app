@@ -23,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const GRANT_PATH: &str = "/v1/nip-fi/agent-grant";
 const ASSERTION_PATH: &str = "/v1/nip-fi/agent-assertion";
-const GRANT_TOKEN_TYPE: &str = "urn:builderlab:params:oauth:token-type:nip-fi-agent-grant";
+const GRANT_TOKEN_TYPE: &str = "urn:nostr:params:oauth:token-type:nip-fi-agent-grant";
 const SIGN_IN: &str = "Sign in to your organization to enroll this agent";
 const STOPPED: &str =
     "Your organization no longer accepts this agent; sign in again to re-enroll it";
@@ -1134,11 +1134,10 @@ impl AgentTokens {
                     .append_pair("subject_token", token)
                     .append_pair(
                         "subject_token_type",
-                        "urn:builderlab:params:oauth:token-type:bb-session",
+                        "urn:nostr:params:oauth:token-type:nip-fa-session",
                     )
                     .append_pair("requested_token_type", GRANT_TOKEN_TYPE)
                     .append_pair("agent_pubkey", &agent.pubkey)
-                    .append_pair("runtime", "local")
                     .append_pair("owner_attestation", &agent.auth)
                     .finish();
                 (
@@ -1170,7 +1169,7 @@ impl AgentTokens {
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(form.as_bytes().to_vec());
             match proof() {
-                Ok(proof) => request.header("Nostr-Agent-Proof", proof),
+                Ok(proof) => request.header("Nostr-Authorization", proof),
                 Err(_) => request,
             }
         });

@@ -221,8 +221,10 @@ observed unread messages (including thread replies) or explicit channel-unread
 intent. It is not an exact message count or evidence of complete history. Unknown
 and observed-zero both omit the dot. Existing bounded evidence/read-state owns
 startup and updates; this projection adds no relay reads, network subscriptions,
-or storage. Confirmed channel mutes remove that channel from the projection without
-removing its retained unread evidence, so unmuting can restore the dot. The dot
+or storage. Confirmed channel mutes count as the sidebar row shows them: a muted channel
+lights the dot only for a mention of you or manual unread, and a muted DM still
+lights it. Muting removes no retained unread evidence, so unmuting can restore
+the dot. The dot
 stays clear while mute preferences are unresolved. Personal space,
 account/session changes, access loss and host disposal clear or recompute the
 indicator. Disabling Channels does not stop host ownership. Desktop alert

@@ -80,7 +80,7 @@ pub(crate) async fn relay_socket_connect(
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if live.len() >= 16 || live.contains_key(&id) {
+        if live.len() >= 32 || live.contains_key(&id) {
             return Err("Native sockets are busy".into());
         }
         live.insert(

@@ -189,21 +189,36 @@ async fn enrollment_exchanges_the_owner_session_with_only_the_agent_proof() {
         .into_owned()
         .collect();
     let field = |name: &str| fields.iter().find(|(n, _)| n == name).unwrap().1.clone();
-    assert_eq!(fields.len(), 7);
+    assert_eq!(fields.len(), 6);
+    assert_eq!(
+        field("grant_type"),
+        "urn:ietf:params:oauth:grant-type:token-exchange"
+    );
     assert_eq!(field("subject_token"), "fixture-session-token");
+    assert_eq!(
+        field("subject_token_type"),
+        "urn:nostr:params:oauth:token-type:nip-fa-session"
+    );
     assert_eq!(field("agent_pubkey"), f.agent.pubkey);
-    assert_eq!(field("runtime"), "local");
     assert_eq!(field("owner_attestation"), f.agent.auth);
-    assert_eq!(field("requested_token_type"), GRANT_TOKEN_TYPE);
+    assert_eq!(
+        field("requested_token_type"),
+        "urn:nostr:params:oauth:token-type:nip-fi-agent-grant"
+    );
+    assert!(fields.iter().all(|(name, _)| name != "runtime"));
     for ambient in ["authorization", "cookie", "x-bb-session"] {
         assert!(wire.headers.iter().all(|(name, _)| name != ambient));
     }
     let proof = &wire
         .headers
         .iter()
-        .find(|(n, _)| n == "nostr-agent-proof")
+        .find(|(n, _)| n == "nostr-authorization")
         .unwrap()
         .1;
+    assert!(wire
+        .headers
+        .iter()
+        .all(|(name, _)| name != "nostr-agent-proof"));
     let proof: serde_json::Value =
         serde_json::from_slice(&STANDARD.decode(&proof["Nostr ".len()..]).unwrap()).unwrap();
     assert_eq!(proof["pubkey"], f.agent.pubkey.as_str());

@@ -273,6 +273,38 @@ it("offers outside agents in the Solo chat mention picker while ordinary channel
   view.unmount();
   test.library.dispose();
 });
+it("draws people outside the channel as people in the mention picker", async () => {
+  const test = setup();
+  const session = {
+    ...test.session,
+    directMessages: {
+      people: vi.fn(async () => ({
+        people: [{ pubkey: "c".repeat(64), name: "Outside person" }],
+        hasMore: false,
+      })),
+    },
+  } as unknown as RelaySession;
+  render(
+    <MentionPicker
+      scope="test"
+      session={session}
+      channelId="parent"
+      disabled={false}
+      select={() => true}
+    />,
+  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Mention a member" }));
+  const row = await screen.findByRole("button", {
+    name: /^Outside person\s*Not in channel/,
+  });
+  expect(row.querySelector("[data-shape]")).toHaveAttribute(
+    "data-shape",
+    "circle",
+  );
+  test.library.dispose();
+});
 it("marks agents, not people, in both mention menus", async () => {
   const test = setup();
   const publish = vi.fn();

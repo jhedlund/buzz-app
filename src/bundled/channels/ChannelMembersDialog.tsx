@@ -7,6 +7,7 @@ import {
 import { useProfileGeneration } from "../../features/relay/react";
 import { agentUnavailable } from "../../features/agents/choices";
 import { archiveHides } from "../../features/relay/identity-archives";
+import { NeedsHistoryChoice } from "../../features/relay/direct-messages";
 import { Button as BaseButton } from "@base-ui/react/button";
 import referenceStyles from "../../shared/InlineReference.module.css";
 import { SEARCH_MIN_CHARS } from "../../shared/search-debounce";
@@ -62,6 +63,7 @@ import {
 } from "../../features/channel-members/administration-protocol";
 import {
   canAddMembers,
+  canAddToDirectMessage,
   canShareSoloChat,
 } from "../../features/channel-members/members";
 import { ownSolo, soloShareDisclosure } from "../../features/solo/labels";
@@ -119,6 +121,7 @@ import { ChannelGeneralAccess } from "./ChannelGeneralAccess";
 import { avatarMedia } from "../../shared/avatar-source";
 import { channelIcon, channelText } from "../../features/channels/channel-icon";
 import { writeClipboardText } from "../../shared/clipboard";
+import { messagePersonLink } from "../../features/direct-messages/message-person";
 
 const INVITATION_GROUP_SIZE = 4;
 const MEMBER_PAGE_SIZE = 50;
@@ -198,6 +201,7 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
   adding,
   picture,
   isAgent,
+  profiled,
   roleLabel,
   archived,
   ownerName,
@@ -223,7 +227,7 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
 }: {
   session: RelaySession;
   channelId: string;
-  place: "chat" | "channel";
+  place: "chat" | "channel" | "DM";
   pubkey: string;
   name: string;
   /** The verified name `name` is not, shown beside it. */
@@ -234,6 +238,7 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
   adding: boolean;
   picture: string | undefined;
   isAgent: boolean;
+  profiled: boolean;
   roleLabel: string | undefined;
   archived: boolean;
   ownerName: string;
@@ -252,7 +257,7 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
   openProfile(destination: string | undefined): boolean;
   onSendMessage: ((key: string) => Promise<void>) | undefined;
   messagePending: boolean;
-  add(key: string): Promise<void>;
+  add(key: string, name: string): Promise<void>;
   busy: boolean;
   addDisabled: boolean;
   canAddWithRole: boolean;
@@ -268,14 +273,19 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
     "aria-disabled": busy || undefined,
     disabled: addDisabled,
     onBlur: (event) => {
-      if (focusedAdd.current?.button === event.currentTarget)
+      // Replacing a pending Add can blur without a destination. Keep its return
+      // target; a deliberate move to another control retires it.
+      if (
+        event.relatedTarget &&
+        focusedAdd.current?.button === event.currentTarget
+      )
         focusedAdd.current = null;
     },
     onClick: (event) => {
       if (busy) return;
       if (document.activeElement === event.currentTarget)
         focusedAdd.current = { key: pubkey, button: event.currentTarget };
-      void add(pubkey);
+      void add(pubkey, name);
     },
     children: busy ? "Adding…" : "Add",
   } satisfies ButtonProps;
@@ -357,6 +367,8 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
       place={place}
       pubkey={pubkey}
       name={name}
+      agent={isAgent}
+      profiled={profiled}
       verifiedOwner={verifiedOwner}
       onChange={onChange}
       returnFocus={input}
@@ -424,7 +436,8 @@ const MemberIdentityRow = memo(function MemberIdentityRow({
 });
 
 type MemberNavigation = {
-  onOpenConversation?: ((channelId: string) => boolean) | undefined;
+  /** Leaves Members for a DM, or a New message draft, by link. */
+  onOpenMessage?: ((link: string) => boolean) | undefined;
   canOpenLink?: ((target: string) => boolean) | undefined;
   onOpenLink?:
     | ((target: string, returnFocus?: HTMLElement) => boolean)
@@ -437,7 +450,7 @@ export function ChannelMembersButton({
   channelId,
   canOpenLink,
   onOpenLink,
-  onOpenConversation,
+  onOpenMessage,
   presentation,
   agents,
   communities,
@@ -504,7 +517,7 @@ export function ChannelMembersButton({
           channelId={channelId}
           canOpenLink={canOpenLink}
           onOpenLink={onOpenLink}
-          onOpenConversation={onOpenConversation}
+          onOpenMessage={onOpenMessage}
           navigator={navigator}
           communities={communities}
           signal={signal}
@@ -573,30 +586,30 @@ function lostFocus(control: HTMLElement) {
   return !control.isConnected && document.activeElement === document.body;
 }
 
-/** The one access dialog. Any conversation lists and adds members; a Solo chat
- * adds people under its share rule and can also be shared to a channel. */
-export function ChannelMembersDialog({
-  session,
-  channelId,
-  close,
-  trigger,
-  title,
-  description,
-  canOpenLink,
-  onOpenLink,
-  onOpenConversation,
-  agents,
-  communities,
-  navigator,
-  signal,
-  visit = false,
-}: {
+/** Supported props for installed plugins reusing the host member picker. */
+export type ChannelMembersDialogProps = {
   session: RelaySession;
   channelId: string;
   close(): void;
   trigger: RefObject<HTMLElement | null>;
   title?: string;
   description?: string;
+  /** Heading and accessible name for search results that are not members. */
+  nonMemberLabel?: string;
+  /** A feature may retain stricter access policy while reusing the member picker. */
+  memberActions?: {
+    canAdd: boolean;
+    pending: boolean;
+    change(change: MemberChange, signal: AbortSignal): Promise<void>;
+  };
+  /** Replaces host General access; null hides it. */
+  accessSettings?: React.ReactNode;
+  /** Copy destination. Plugin-managed pickers hide Copy link when omitted. */
+  shareLink?: string;
+};
+
+/** Host navigation and visit lifetimes stay outside the plugin contract. */
+type HostChannelMembersDialogProps = ChannelMembersDialogProps & {
   agents?: Agents;
   communities?: CommunityReader | undefined;
   navigator?: Navigation | undefined;
@@ -604,7 +617,31 @@ export function ChannelMembersDialog({
   signal?: AbortSignal | undefined;
   /** Opened as its own navigation visit, so Back closes it; local opens are not. */
   visit?: boolean;
-} & MemberNavigation) {
+} & MemberNavigation;
+
+export function ChannelMembersDialog({
+  session,
+  channelId,
+  close,
+  trigger,
+  title,
+  description,
+  nonMemberLabel,
+  memberActions,
+  accessSettings,
+  shareLink,
+  canOpenLink,
+  onOpenLink,
+  onOpenMessage,
+  agents,
+  communities,
+  navigator,
+  signal,
+  visit = false,
+}: HostChannelMembersDialogProps) {
+  const [changingMember, setChangingMember] = useState(false);
+  const changeInFlight = useRef<AbortSignal | undefined>(undefined);
+  const memberPending = !!memberActions?.pending || changingMember;
   const presenceId = useId();
   const openingDestination = useRef(false);
   const messagePending = useRef(false);
@@ -648,6 +685,7 @@ export function ChannelMembersDialog({
   );
   const chooseChange = useCallback(
     (change: MemberChange) => {
+      if (memberPending) return;
       setChangeError(undefined);
       confirmed.current = false;
       setIntent({
@@ -657,7 +695,7 @@ export function ChannelMembersDialog({
         scrollTop: scrollport.current?.scrollTop ?? 0,
       });
     },
-    [session, channelId],
+    [session, channelId, memberPending],
   );
   const lastShown = useRef(shownIntent);
   // Before paint: the returning list keeps its offset and focuses the
@@ -668,8 +706,10 @@ export function ChannelMembersDialog({
     if (shownIntent === previous) return;
     lastShown.current = shownIntent;
     if (shownIntent) {
-      // Enter confirms reversible changes; removal starts on Cancel.
-      (shownIntent.change.role !== "remove" && !apply.current?.disabled
+      // Enter confirms reversible changes; removal and transfer start on Cancel.
+      (shownIntent.change.role !== "remove" &&
+      shownIntent.change.role !== "owner" &&
+      !apply.current?.disabled
         ? apply.current
         : cancel.current
       )?.focus();
@@ -767,10 +807,10 @@ export function ChannelMembersDialog({
   const [query, setQuery] = useState("");
   const [selectedIdentity, setSelectedIdentity] = useState("All");
   const [selectedAccess, setSelectedAccess] = useState("All");
-  const [soloAdditions, setSoloAdditions] = useState<
+  const [directAdditions, setDirectAdditions] = useState<
     Record<string, { pending: boolean; error?: string }>
   >({});
-  const soloPending = useRef(new Set<string>());
+  const directPending = useRef(new Set<string>());
   const additions = useSyncExternalStore(
     session.memberAdditions.subscribe,
     session.memberAdditions.snapshot,
@@ -778,20 +818,26 @@ export function ChannelMembersDialog({
   ).filter((item) => item.channelId === channelId);
   const busy = new Set([
     ...additions.filter((item) => item.pending).map((item) => item.pubkey),
-    ...Object.keys(soloAdditions).filter((key) => soloAdditions[key]?.pending),
+    ...Object.keys(directAdditions).filter(
+      (key) => directAdditions[key]?.pending,
+    ),
   ]);
   // One alert per reason: a refused team add names its members together.
-  // Solo agents join directly, one at a time, so each keeps its own Retry.
+  // Solo agents and DM additions join directly, one at a time, so each keeps
+  // its own Retry.
   const refusals = new Map<string, { error: string; keys: string[] }>();
   const refuse = (group: string, error: string, key: string) => {
     const item = refusals.get(group) ?? { error, keys: [] };
     item.keys.push(key);
     refusals.set(group, item);
   };
-  for (const item of additions)
-    if (item.error) refuse(item.error, item.error, item.pubkey);
-  for (const [key, item] of Object.entries(soloAdditions))
-    if (item.error) refuse(key, item.error, key);
+  // Retained host recovery stays with its owner, including uncertain receipts.
+  if (!memberActions) {
+    for (const item of additions)
+      if (item.error) refuse(item.error, item.error, item.pubkey);
+    for (const [key, item] of Object.entries(directAdditions))
+      if (item.error) refuse(key, item.error, key);
+  }
   const [notice, setNotice] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const copyFailure = copyStatus && copyStatus !== "Link copied";
@@ -844,7 +890,16 @@ export function ChannelMembersDialog({
     list.channels.find((item) => item.id === channelId) ??
     session.channels.get?.(channelId);
   const solo = channel?.channelType === "solo";
-  const place = solo ? "chat" : "channel";
+  const dm = channel?.channelType === "dm";
+  const place = solo ? "chat" : dm ? "DM" : "channel";
+  // The relay's moderation DM carries its notices; no one joins it.
+  const moderationDm =
+    dm &&
+    !!session.relayAuthor &&
+    !!channel?.members?.includes(session.relayAuthor);
+  const nonMemberHeading =
+    nonMemberLabel?.trim() ||
+    (memberActions ? "Not yet added" : `Not in this ${place}`);
   const readOnlyAccess =
     channel?.viewerRole === "guest" ||
     (channel?.readOnly && channel.joinRole === "guest");
@@ -863,8 +918,11 @@ export function ChannelMembersDialog({
     ownSolo(channel, session.viewer) &&
     canShareSoloChat(session, channel) &&
     session.channelWrites.available;
-  const canAddPeople = solo ? share.eligible : canAddMembers(session, channel);
-  const canAdd = canAddPeople || canAddSoloAgents;
+  const canAddPeople = solo
+    ? share.eligible
+    : dm
+      ? canAddToDirectMessage(session, channel)
+      : canAddMembers(session, channel);
   const generalAccess =
     channel &&
     (solo ||
@@ -918,9 +976,11 @@ export function ChannelMembersDialog({
   useEffect(() => {
     const controller = new AbortController();
     lifetime.current = controller;
+    changeInFlight.current = undefined;
+    setChangingMember(false);
     setAgentsBusy(false);
-    setSoloAdditions({});
-    soloPending.current = new Set();
+    setDirectAdditions({});
+    directPending.current = new Set();
     messagePending.current = false;
     setOpeningMessage(false);
     setMessageError("");
@@ -983,6 +1043,12 @@ export function ChannelMembersDialog({
     memberKey,
     !!channel && !channel.cached,
   );
+  const canAdd =
+    (canAddPeople || canAddSoloAgents) &&
+    (!memberActions ||
+      (memberActions.canAdd &&
+        administration.status === "ready" &&
+        administration.authority.canManage));
   if (
     administration.operation?.change.expectedRole === "absent" &&
     administration.operation.status === "pending"
@@ -1526,6 +1592,8 @@ export function ChannelMembersDialog({
   let changePermitted = false;
   if (
     selection &&
+    !memberPending &&
+    (selection.expectedRole !== "absent" || memberActions?.canAdd !== false) &&
     (selection.expectedRole !== "absent" ||
       !agentUnavailable(session, selection.pubkey)) &&
     administration.status === "ready" &&
@@ -1538,6 +1606,9 @@ export function ChannelMembersDialog({
         session.viewer ?? "",
         selection,
         ownership.owners.get(selection.pubkey),
+        known.has(selection.pubkey) ||
+          !profiles.has(selection.pubkey) ||
+          !!profiles.get(selection.pubkey)?.isAgent,
       );
       changePermitted = true;
     } catch {
@@ -1554,6 +1625,7 @@ export function ChannelMembersDialog({
     agentsBusy ||
     archives.status === "loading";
   const mutationPending =
+    memberPending ||
     busy.size > 0 ||
     share.busy ||
     administration.operation?.status === "pending";
@@ -1567,7 +1639,9 @@ export function ChannelMembersDialog({
   // A confirmed change's own error appears above the list and shortens it.
   // When the change settles, keep its member's Actions in view, unless focus
   // or the list has moved since the return.
-  const operationStatus = administration.operation?.status;
+  const operationStatus = memberPending
+    ? "pending"
+    : administration.operation?.status;
   useLayoutEffect(() => {
     const kept = keepInView.current;
     if (!kept || operationStatus === "pending") return;
@@ -1605,7 +1679,9 @@ export function ChannelMembersDialog({
   const teamNames = new Map(
     (agentsSnapshot?.agents ?? []).map((agent) => [agent.pubkey, agent.name]),
   );
-  const teams = (solo ? [] : (agentsSnapshot?.teams ?? [])).flatMap((team) => {
+  const teams = (
+    solo || dm || memberActions ? [] : (agentsSnapshot?.teams ?? [])
+  ).flatMap((team) => {
     const missing = team.members.filter(
       (key) => teamNames.has(key) && !members.has(key),
     );
@@ -1638,7 +1714,8 @@ export function ChannelMembersDialog({
   ])
     shownNames.set(name, (shownNames.get(name) ?? 0) + 1);
   // A confirmation can replace its Add button or retire another pending row.
-  // DOM removal does not emit blur, so restore focus only if it was not moved elsewhere.
+  // Native replacement may fall back to the body or the dialog's focus trap.
+  // Restore focus only if it was not moved to another control.
   useLayoutEffect(() => {
     const previous = focusedAdd.current;
     if (
@@ -1647,65 +1724,180 @@ export function ChannelMembersDialog({
         (offering || previous.button.isConnected))
     )
       return;
-    focusedAdd.current = null;
-    if (
-      document.activeElement === previous.button ||
-      document.activeElement === document.body
-    )
-      input.current?.focus();
+    const restore = () => {
+      if (
+        document.activeElement === previous.button ||
+        document.activeElement === document.body ||
+        document.activeElement === input.current?.closest('[role="dialog"]')
+      )
+        input.current?.focus();
+    };
+    restore();
+    // The trap may also react after this commit. Recheck ownership next frame
+    // so that a deliberate focus move still wins.
+    const frame = requestAnimationFrame(() => {
+      if (focusedAdd.current !== previous) return;
+      focusedAdd.current = null;
+      restore();
+    });
+    return () => cancelAnimationFrame(frame);
   }, [memberKey, offering]);
+  const [dmChoice, setDmChoice] = useState<string>();
+  const changeMember = useCallback(
+    async (change: MemberChange, signal: AbortSignal) => {
+      if (
+        memberActions &&
+        (memberActions.pending ||
+          changeInFlight.current ||
+          (change.expectedRole === "absent" && !memberActions.canAdd))
+      )
+        return false;
+      if (memberActions) {
+        changeInFlight.current = signal;
+        setChangingMember(true);
+      }
+      setChangeError(undefined);
+      try {
+        if (memberActions) {
+          if (change.expectedRole === "absent") {
+            const state = session.memberAdministration.snapshot(channelId);
+            if (state.status !== "ready")
+              throw new Error("Refresh members and roles before trying again.");
+            authorizeMemberChange(
+              state.authority,
+              session.viewer ?? "",
+              change,
+            );
+          }
+          await memberActions.change(change, signal);
+        } else await session.memberAdministration.run(channelId, change);
+        return !signal.aborted;
+      } catch (error) {
+        if (!signal.aborted)
+          setChangeError({
+            session,
+            channelId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        return false;
+      } finally {
+        if (changeInFlight.current === signal) {
+          changeInFlight.current = undefined;
+          if (!signal.aborted) setChangingMember(false);
+        }
+      }
+    },
+    [memberActions, session, channelId],
+  );
   const add = useCallback(
-    async (key: string) => {
+    async (key: string, name: string, includeHistory?: boolean) => {
       const signal = lifetime.current?.signal;
-      if (!signal) return;
+      if (!signal || memberPending || (memberActions && !memberActions.canAdd))
+        return;
+      setNotice("");
+      if (memberActions) {
+        // Plugin writes disable Add. Hand off before the dialog trap can queue
+        // a recovery that would overwrite a later deliberate focus move.
+        if (document.activeElement === focusedAdd.current?.button)
+          input.current?.focus();
+        if (
+          await changeMember(
+            { pubkey: key, expectedRole: "absent", role: "member" },
+            signal,
+          )
+        ) {
+          setQuery("");
+          setSelectedIdentity("All");
+          setSelectedAccess("All");
+          setNotice(`${name} added.`);
+        }
+        return;
+      }
       // Capture this intent's text without changing the callback on each key.
       const typed = pickerText(
         "channel-members",
         input.current?.value.trim().toLowerCase() ?? "",
       );
-      setNotice("");
-      // A Solo owner's agents join directly; people use ordinary additions.
+      const pending = directPending.current;
+      // A Solo owner's agents and DM additions join directly; people use
+      // ordinary additions.
       const direct =
-        canAddSoloAgents &&
-        session.agentChoices
-          .snapshot()
-          .selectable.some((agent) => agent.pubkey === key);
-      const pending = soloPending.current;
+        dm ||
+        (canAddSoloAgents &&
+          session.agentChoices
+            .snapshot()
+            .selectable.some((agent) => agent.pubkey === key));
       if (direct) {
         if (pending.has(key)) return;
         pending.add(key);
-        setSoloAdditions((old) => ({ ...old, [key]: { pending: true } }));
+        setDirectAdditions((old) => ({ ...old, [key]: { pending: true } }));
       }
       try {
-        if (direct)
+        const destination = dm
+          ? await session.directMessages.add(
+              channelId,
+              [key],
+              // Only the relay knows who is an agent: it adds agents, starts
+              // a new DM for a person added to a DM of one person, and asks
+              // when a person would join this one.
+              includeHistory ?? "ask",
+              signal,
+            )
+          : channelId;
+        if (!dm && direct)
           await session.channelWrites.addAgents(
             channelId,
             [key],
             () => !signal.aborted,
           );
-        else await session.memberAdditions.add(channelId, key);
+        else if (!dm) await session.memberAdditions.add(channelId, key);
         if (!signal.aborted) {
           recordChoice(session.scope, typed, personKey(key));
           if (direct) {
-            setSoloAdditions((old) => ({ ...old, [key]: { pending: false } }));
+            setDirectAdditions((old) => ({
+              ...old,
+              [key]: { pending: false },
+            }));
             setQuery("");
             setSelectedIdentity("All");
             setSelectedAccess("All");
           }
+          // Without history, or into a DM these people already have: go there.
+          if (destination !== channelId) {
+            openingDestination.current = true;
+            if (
+              onOpenMessage?.(
+                `buzz://channel/${encodeURIComponent(destination)}`,
+              )
+            ) {
+              close();
+              return;
+            }
+            openingDestination.current = false;
+          }
           setNotice(
-            `${session.names.resolve(key, session.profiles.snapshot().get(key)?.name ?? session.agentChoices.snapshot().identities.find((agent) => agent.pubkey === key)?.name ?? formatPublicKey(key) ?? "Unknown member")}${direct ? " added." : ` is in the ${place}.`}`,
+            `${name}${destination !== channelId ? " is in another DM." : direct ? " added." : ` is in the ${place}.`}`,
           );
         }
       } catch (error: unknown) {
-        if (direct && !signal.aborted)
-          setSoloAdditions((old) => ({
+        if (error instanceof NeedsHistoryChoice && !signal.aborted) {
+          // Nothing was added: they choose, then this adds with their choice.
+          setDirectAdditions((old) => {
+            const { [key]: _, ...rest } = old;
+            return rest;
+          });
+          setDmChoice(key);
+        } else if (direct && !signal.aborted)
+          setDirectAdditions((old) => ({
             ...old,
             [key]: {
               pending: false,
               error:
                 error instanceof Error
                   ? error.message
-                  : "Could not add this agent. Try again.",
+                  : dm
+                    ? "Could not add them. Try again."
+                    : "Could not add this agent. Try again.",
             },
           }));
         // Ordinary additions retain session-owned recovery.
@@ -1713,7 +1905,18 @@ export function ChannelMembersDialog({
         if (direct) pending.delete(key);
       }
     },
-    [session, channelId, canAddSoloAgents, place],
+    [
+      session,
+      channelId,
+      canAddSoloAgents,
+      place,
+      dm,
+      onOpenMessage,
+      close,
+      memberActions,
+      memberPending,
+      changeMember,
+    ],
   );
 
   // Adds a team or retries a refused group; `done` is announced only once
@@ -1721,7 +1924,7 @@ export function ChannelMembersDialog({
   const addAll = useCallback(
     async (keys: readonly string[], done: string) => {
       const signal = lifetime.current?.signal;
-      if (!signal) return;
+      if (!signal || memberActions || memberPending) return;
       setNotice("");
       const added = await Promise.allSettled(
         keys.map((key) => session.memberAdditions.add(channelId, key)),
@@ -1729,7 +1932,7 @@ export function ChannelMembersDialog({
       if (!signal.aborted && added.every((item) => item.status === "fulfilled"))
         setNotice(done);
     },
-    [session, channelId],
+    [session, channelId, memberActions, memberPending],
   );
 
   // Typed text highlights the first person not in the channel, so Enter adds
@@ -1738,7 +1941,8 @@ export function ChannelMembersDialog({
     query,
     keys: offering ? visibleCandidates.map((person) => person.pubkey) : [],
     onChoose: (key) => {
-      if (!busy.has(key) && !rosterBusy && !rosterError) void add(key);
+      if (!busy.has(key) && !rosterBusy && !rosterError)
+        void add(key, label(key));
     },
   });
   const latestHighlight = useRef(highlight);
@@ -1753,9 +1957,12 @@ export function ChannelMembersDialog({
     (person) => person.pubkey === highlight.active,
   );
 
+  const copyLink =
+    shareLink ?? (memberActions ? undefined : soloChatLink(channelId));
   const copy = async () => {
+    if (!copyLink) return;
     try {
-      await writeClipboardText(soloChatLink(channelId));
+      await writeClipboardText(copyLink);
       setCopyStatus("Link copied");
     } catch {
       setCopyStatus("Couldn’t copy the link.");
@@ -1774,7 +1981,7 @@ export function ChannelMembersDialog({
         !signal ||
         signal.aborted ||
         messagePending.current ||
-        !onOpenConversation ||
+        !onOpenMessage ||
         !session.directMessages.available ||
         !session.viewer ||
         key === session.viewer ||
@@ -1788,11 +1995,11 @@ export function ChannelMembersDialog({
       setOpeningMessage(true);
       setMessageError("");
       try {
-        const destination = await session.directMessages.open([key], signal);
+        const destination = await messagePersonLink(session, key, signal);
         if (signal.aborted) return;
         // The destination owns focus; closing Members must not return it to this header.
         openingDestination.current = true;
-        if (onOpenConversation(destination)) close();
+        if (onOpenMessage(destination)) close();
         else {
           openingDestination.current = false;
           setMessageError(
@@ -1816,7 +2023,7 @@ export function ChannelMembersDialog({
     },
     [
       session,
-      onOpenConversation,
+      onOpenMessage,
       close,
       profiles,
       known,
@@ -1864,6 +2071,7 @@ export function ChannelMembersDialog({
         adding={adding}
         picture={picture ?? profiles.get(key)?.picture}
         isAgent={isAgent}
+        profiled={profiles.has(key)}
         archived={isArchived(key)}
         roleLabel={
           isAgent && role === "bot"
@@ -1897,7 +2105,7 @@ export function ChannelMembersDialog({
           key !== session.viewer &&
           session.viewer &&
           session.directMessages.available &&
-          onOpenConversation
+          onOpenMessage
             ? openMessage
             : undefined
         }
@@ -1908,10 +2116,12 @@ export function ChannelMembersDialog({
           rosterBusy ||
           !!rosterError ||
           administration.operation?.status === "pending" ||
-          administration.operation?.status === "uncertain"
+          administration.operation?.status === "uncertain" ||
+          memberPending
         }
         canAddWithRole={
           !solo &&
+          !dm &&
           session.memberAdministration.available &&
           administration.status === "ready" &&
           administration.authority.canManage &&
@@ -1971,7 +2181,7 @@ export function ChannelMembersDialog({
   );
   const shareAction = useRef<HTMLButtonElement>(null);
   const cancelShare = useRef<HTMLButtonElement>(null);
-  const copyAction = (
+  const copyAction = copyLink ? (
     <Tooltip
       content="Copying a link does not grant access."
       disableHoverablePopup
@@ -1982,7 +2192,7 @@ export function ChannelMembersDialog({
         </span>
       </Button>
     </Tooltip>
-  );
+  ) : null;
   const searchField = (
     <div className={styles.memberSearch}>
       <SearchField
@@ -2102,26 +2312,29 @@ export function ChannelMembersDialog({
       </span>
     </div>
   );
-  const accessControl = generalAccess ? (
-    <ChannelGeneralAccess
-      key={channelId}
-      capability={session.channelDetails}
-      recovery={session.recovery}
-      channelId={channelId}
-      channel={channel}
-      mayHaveGuestMembers={
-        administration.status !== "ready" ||
-        Object.values(administration.authority.roles).includes("guest")
-      }
-    />
-  ) : null;
+  const accessControl =
+    accessSettings !== undefined ? (
+      accessSettings
+    ) : generalAccess ? (
+      <ChannelGeneralAccess
+        key={channelId}
+        capability={session.channelDetails}
+        recovery={session.recovery}
+        channelId={channelId}
+        channel={channel}
+        mayHaveGuestMembers={
+          administration.status !== "ready" ||
+          Object.values(administration.authority.roles).includes("guest")
+        }
+      />
+    ) : null;
   const dialog = (
     <Dialog
       open
       // Its confirmation step is a nested surface, not part of the visit.
       visit={visit && !selection}
       dismissOnOutsideClick
-      preventClose={share.busy}
+      preventClose={share.busy || memberPending}
       step={
         selection
           ? { key: "confirmation", scale: 0.95 }
@@ -2130,19 +2343,21 @@ export function ChannelMembersDialog({
       onOpenChange={(open) => {
         if (!open) {
           if (selection) setIntent(undefined);
-          else if (!share.busy) close();
+          else if (!share.busy && !memberPending) close();
         }
       }}
       title={
         selection
           ? selection.role === "remove"
             ? `Remove ${removalTarget} from ${place}`
-            : selection.expectedRole === "absent"
-              ? "Add member?"
-              : `Change access to ${memberAccessLabel(selection.role)}?`
+            : selection.role === "owner"
+              ? `Transfer ownership to ${selectedName}?`
+              : selection.expectedRole === "absent"
+                ? "Add member?"
+                : `Change access to ${memberAccessLabel(selection.role)}?`
           : (title ?? memberAccess(channel).title)
       }
-      height={selection ? "content" : generalAccess ? "stable-tall" : "stable"}
+      height={selection ? "content" : accessControl ? "stable-tall" : "stable"}
       bodyLayout={selection ? "flow" : "flex"}
       footerGap={
         selection && selection.role !== "remove" ? "default" : "compact"
@@ -2178,36 +2393,37 @@ export function ChannelMembersDialog({
             <Button
               ref={apply}
               variant={
-                selection.role === "remove" ? "destructive" : "prominent"
+                selection.role === "remove" || selection.role === "owner"
+                  ? "destructive"
+                  : "prominent"
               }
               disabled={!changePermitted}
               onClick={() => {
                 if (!changePermitted) return;
                 confirmed.current = true;
                 setIntent(undefined);
-                void session.memberAdministration
-                  .run(channelId, selection)
-                  .catch((error: unknown) => {
-                    setChangeError({
-                      session,
-                      channelId,
-                      message:
-                        error instanceof Error ? error.message : String(error),
-                    });
-                  });
+                const signal = lifetime.current?.signal;
+                if (!signal) return;
+                void changeMember(selection, signal);
               }}
             >
               {selection.role === "remove"
                 ? `Remove ${removalTarget}`
-                : selectedAddition
-                  ? selectedAddition.action
-                  : selection.role === "admin"
-                    ? "Set as admin"
-                    : `Set to ${memberAccessLabel(selection.role).toLowerCase()}`}
+                : selection.role === "owner"
+                  ? "Transfer ownership"
+                  : selectedAddition
+                    ? selectedAddition.action
+                    : selection.role === "admin"
+                      ? "Set as admin"
+                      : `Set to ${memberAccessLabel(selection.role).toLowerCase()}`}
             </Button>
           </>
         ) : (
-          <Button variant="prominent" disabled={share.busy} onClick={close}>
+          <Button
+            variant="prominent"
+            disabled={share.busy || memberPending}
+            onClick={close}
+          >
             Done
           </Button>
         )
@@ -2218,8 +2434,10 @@ export function ChannelMembersDialog({
       {selection ? (
         selection.role !== "remove" && (
           <p className="text-body-sm">
-            {selectedAddition?.description ??
-              `Change access from ${memberAccessLabel(selection.expectedRole)} to ${memberAccessLabel(selection.role)}. ${selection.role === "admin" ? `Admins can manage this ${place} and its members.` : `This changes what they can do in this ${place}.`}`}
+            {selection.role === "owner"
+              ? `${selectedName} becomes the owner of this ${place} and you'll become an admin. They can change your role, remove you or delete the ${place}. Only an owner can make you an owner again.`
+              : (selectedAddition?.description ??
+                `Change access from ${memberAccessLabel(selection.expectedRole)} to ${memberAccessLabel(selection.role)}. ${selection.role === "admin" ? `Admins can manage this ${place} and its members.` : `This changes what they can do in this ${place}.`}`)}
           </p>
         )
       ) : (
@@ -2270,13 +2488,13 @@ export function ChannelMembersDialog({
                     <Button
                       variant="outline"
                       aria-label={`Retry adding ${names}`}
-                      disabled={!canAdd}
+                      disabled={!canAdd || memberPending}
                       onClick={() => {
                         // Land where Add does, so the next step is the search.
                         input.current?.focus();
                         const [only] = keys;
                         void (only && keys.length === 1
-                          ? add(only)
+                          ? add(only, label(only))
                           : addAll(keys, `${names} are in the ${place}.`));
                       }}
                     >
@@ -2309,19 +2527,24 @@ export function ChannelMembersDialog({
             data-refreshing={refreshing}
           >
             {accessControl}
-            {!canAdd && !readOnlyAccess && !(solo && rosterBusy) && (
-              <p className="px-control-inset text-body-sm text-subtle">
-                {channel?.channelType === "dm"
-                  ? "DM membership cannot be changed here."
-                  : channel?.archived
-                    ? `Archived ${place}s cannot add members.`
-                    : !session.outbox?.supports(9000)
-                      ? "Adding members is unavailable in this connection."
-                      : solo
-                        ? "You cannot share this chat."
-                        : "Join this channel to add people and agents."}
-              </p>
-            )}
+            {!memberActions &&
+              !canAdd &&
+              !readOnlyAccess &&
+              !(solo && rosterBusy) && (
+                <p className="px-control-inset text-body-sm text-subtle">
+                  {moderationDm
+                    ? "People can’t be added to this DM."
+                    : dm && !channel?.archived
+                      ? "Adding people to this DM is unavailable in this connection."
+                      : channel?.archived
+                        ? `Archived ${place}s cannot add members.`
+                        : !session.outbox?.supports(9000)
+                          ? "Adding members is unavailable in this connection."
+                          : solo
+                            ? "You cannot share this chat."
+                            : "Join this channel to add people and agents."}
+                </p>
+              )}
             {rosterError && (
               <p
                 role="alert"
@@ -2439,11 +2662,11 @@ export function ChannelMembersDialog({
             {offering && (
               <section
                 className={styles.memberGroup}
-                aria-label={`Not in this ${place}`}
+                aria-label={nonMemberHeading}
                 {...highlight.listProps}
               >
                 <div className="pt-2 px-control-inset">
-                  <InlineHeader title={`Not in this ${place}`} />
+                  <InlineHeader title={nonMemberHeading} />
                 </div>
                 {teams.length > 0 && (
                   <ul aria-label="Teams" aria-busy={refreshing}>
@@ -2707,6 +2930,36 @@ export function ChannelMembersDialog({
                 onClick={() => void share.confirm()}
               >
                 Share
+              </Button>
+            </>
+          }
+        />
+      )}
+      {dmChoice && (
+        <AlertDialog
+          title={`Add ${label(dmChoice)}?`}
+          description="Include history to add them to this DM with its earlier messages."
+          onClose={() => setDmChoice(undefined)}
+          finalFocus={input}
+          actions={
+            <>
+              <Button onClick={() => setDmChoice(undefined)}>Cancel</Button>
+              <Button
+                onClick={() => {
+                  setDmChoice(undefined);
+                  void add(dmChoice, label(dmChoice), false);
+                }}
+              >
+                Start a new DM
+              </Button>
+              <Button
+                variant="prominent"
+                onClick={() => {
+                  setDmChoice(undefined);
+                  void add(dmChoice, label(dmChoice), true);
+                }}
+              >
+                Include history
               </Button>
             </>
           }

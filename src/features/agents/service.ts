@@ -1,4 +1,10 @@
+import type { PublishOptions } from "../../buzz-mcp/client";
 import { followUpQueue } from "../messages/follow-up-queue";
+import type {
+  AgentModelSettings,
+  AgentModelSettingsContext,
+  AgentModelSettingsReadout,
+} from "./model-settings";
 import {
   createSessionAdmissions,
   type AgentSessionRouter,
@@ -15,6 +21,7 @@ import {
 } from "./execution";
 import type { JsonValue } from "../navigation/targets";
 import { removeSessionPrompts } from "./session-prompts";
+import { removeStandaloneSessions } from "./standalone-sessions";
 import { appClient, readFile } from "../../buzz-mcp/app-client";
 import { respond } from "../../buzz-mcp/rpc";
 import { respondExternal } from "../../buzz-mcp/external";
@@ -234,6 +241,12 @@ import {
 } from "../solo/default-agent";
 import type { AgentPlugins } from "../../plugins/requests";
 import type { DeviceSettings } from "../../shared/device-settings";
+import type { TurnContext } from "./gateway/contract";
+import {
+  type EligibleRoute,
+  type FallbackReason,
+  gatewayRoutes,
+} from "./gateway/route";
 
 /** Where an agent runs: `here`, with its key on this device; `hosted`, by its
  * type's provider; or `elsewhere`, on another of the owner's devices. Only an
@@ -561,8 +574,17 @@ export type AgentHandle = Readonly<{
   /** On a run's handle only: wakes this agent in another of its
    * conversations, as `Agents.wake` would, telling it the wake is its own. */
   handoff?(handoff: AgentHandoff): void;
+  /** On a run's handle only: whether this agent's threads in `channel` have
+   * sessions of their own, apart from its channel-level conversation there,
+   * so a handoff from that conversation into a thread reaches another;
+   * undefined while the channel is not known here yet. */
+  threadsApart?(channel: string): boolean | undefined;
   /** Rechecks an operation lifetime after channel startup, before signing. */
-  publish(event: AgentEventTemplate, check?: () => void): Promise<RelayEvent>;
+  publish(
+    event: AgentEventTemplate,
+    check?: () => void,
+    options?: PublishOptions,
+  ): Promise<RelayEvent>;
   /** Reads the community as the agent, seeing only what it may see. */
   query(filters: readonly object[]): Promise<RelayEvent[]>;
   effectiveEdit(id: string, channel: string): Promise<RelayEvent>;
@@ -804,6 +826,10 @@ export type Delivery<Config = unknown> = Readonly<{
   ignored?(refusal?: MentionRefusal): void;
   /** The harness acknowledged this exact request. Not proof of model consumption. */
   acknowledged?(input?: Readonly<{ steering?: true }>): void;
+  /** Final guarded handoff to the prompt/steer transport. Call after the last
+   * current/signal check, with no asynchronous work before submission. This
+   * is separate from UI acknowledgement and does not imply model consumption. */
+  accepted?(): void;
   /** A newer acknowledged request owns this turn's activity; hide this message's
    * bubble without claiming success or changing the execution outcome. */
   superseded?(): void;
@@ -816,6 +842,26 @@ export type Delivery<Config = unknown> = Readonly<{
   named?(title: string): void;
   /** Rebuilds an addressed subscription prompt after harness readiness or a queue wait. */
   wakeText?(): Promise<string | undefined>;
+  /** This membership routes inference through the agent gateway: its
+   * eligible route, this turn's context and the upstream base this build
+   * configures for the type's harness, all frozen at dispatch. Absent when it
+   * doesn't: an external community, gateway routing off in this build, a
+   * type that names no harness, one this build gives no upstream or one the
+   * gateway doesn't enable, or a blocked route (see `gatewayFallback`). */
+  gateway?: Readonly<{
+    route: EligibleRoute;
+    turn: TurnContext;
+    upstream: Readonly<{ base: string }>;
+  }>;
+  /** A blocked route sent this turn to the type's own configuration, decided
+   * before dispatch, after waiting up to `TURN_READINESS_WAIT_MS` for an
+   * access check in flight; never with `gateway`. Every blocked reason
+   * falls back this way except a 401 or 403 (`auth`) and a route still
+   * pending after the wait, which fail the turn before dispatch instead. The
+   * host owns the decision and `notice`; a type shows `notice` in this turn's
+   * visible activity where the host can't (any turn but a mention, whose
+   * request it already notes). */
+  gatewayFallback?: Readonly<{ reason: FallbackReason; notice: string }>;
   /** Whether the trigger should still run, asked again now. False once the
    * agent is removed or its type replaced; for a watch or timer, also once
    * attention was turned off or its object disabled or removed; and for a
@@ -920,6 +966,9 @@ export type AgentVoiceConnection = Readonly<{
 }>;
 
 export type AgentType<Config = unknown> = {
+  /** Checks Delivery.current() and signal after waits, immediately before each
+   * prompt/steer handoff, then calls Delivery.accepted() at that handoff. */
+  readonly supportsGuardedWake?: true;
   /** Carries Delivery.session into tool context and sessionContext into the prompt. */
   sessionAdmission?: true;
   /** Huddles supplies a running agent owned by the current viewer.
@@ -957,6 +1006,12 @@ export type AgentType<Config = unknown> = {
   /** What of `config` another type may adopt when the agent changes type.
    * Without it, all of its settings stay behind. */
   carry?(config: Config): Carry;
+  /** Safe model selections for agent_read. No discovery, I/O or
+   * active-session claims. Without it these settings are unavailable. */
+  readModelSettings?(
+    config: Config,
+    context?: AgentModelSettingsContext,
+  ): AgentModelSettings;
   /** Describes harness settings for a type-change preview. Rendered labels
    * never determine migration behavior. */
   describeMigration?(config: Config): readonly AgentMigrationSetting[];
@@ -1093,6 +1148,12 @@ export type AgentType<Config = unknown> = {
    * again marked `resumed` if the owner chooses to resume it, to carry on in
    * the conversation's saved session, or in a new one shown the conversation. */
   resumes?: boolean;
+  /** The type can route inference through the agent gateway with
+   * `Delivery.gateway`, under this stable harness name (e.g. "pi"). It does
+   * only when this build configures an upstream for the harness and the
+   * membership's gateway enables it; otherwise, and for types without it,
+   * turns keep their existing behavior. */
+  gateway?: Readonly<{ harness: string }>;
   /** Makes the type hosted: its provider runs each agent, so it has no `run`,
    * `models` or `timeoutMs`, and its agents have no attention. */
   remote?: RemoteAgentType;
@@ -1249,7 +1310,12 @@ export type AgentUpdateRequest = AgentUpdate &
  * its synced instructions when the owner can read them here, and otherwise
  * has `unavailable` instead, saying why. */
 export type AgentReadout = Readonly<
-  { pubkey: string; name: string; type: string } & (
+  {
+    pubkey: string;
+    name: string;
+    type: string;
+    modelSettings: AgentModelSettingsReadout;
+  } & (
     | { instructions: string | null; synced: boolean; revision?: string }
     | { unavailable: string }
   )
@@ -1462,6 +1528,31 @@ export type Agents = {
    * comes from this plugin, not its owner, and is data. Throws when this copy does not run the agent or its queue is full;
    * like a mention, a queued wake is dropped if the agent stops running here. */
   wake(agent: AgentKey, wake: AgentWake): void;
+  /** Check `=== true` before passing guard options to `wake`. Older hosts can
+   * ignore extra arguments; never send a wake to probe for support. */
+  readonly supportsGuardedWake?: true;
+  /** Checks the caller's guard at admission and before
+   * prompt/steer submission. Delivered means transport handoff, not completion;
+   * cancellation cannot retract accepted input. Host authority still applies.
+   * Invalid arguments throw synchronously; guard errors drop the wake. */
+  wake(
+    agent: AgentKey,
+    wake: AgentWake,
+    options: Readonly<{ signal?: AbortSignal; current: () => boolean }>,
+  ): Promise<
+    Readonly<
+      | { status: "delivered" }
+      | {
+          status: "dropped";
+          reason:
+            | "aborted"
+            | "stale"
+            | "guard-error"
+            | "unavailable"
+            | "refused";
+        }
+    >
+  >;
   snapshot(): AgentsSnapshot;
   subscribe(listener: () => void): () => void;
   /** Calls `listener` when a turn this copy of the app runs for the agent
@@ -1480,6 +1571,10 @@ export type Agents = {
   readInterrupted(agent: Agent, signal: AbortSignal): Promise<RelayEvent[]>;
   /** The agent of this pubkey in the selected community, if it is an agent. */
   find(pubkey: string): Agent | undefined;
+  /** Safe current model selections for a local membership, as agent_read
+   * reports them. Reads existing state; never starts discovery or a harness.
+   * Feature-detect on older hosts. Does not report active session overrides. */
+  readModelSettings?(agent: AgentKey): Promise<AgentModelSettingsReadout>;
   /** The agent as `run` holds it, outside any run: for one of the calling
    * plugin's types while this copy of the app runs it, its type is not
    * changing and its community is live, else undefined. A type whose agents
@@ -1899,6 +1994,8 @@ type Binding = {
   origin: string;
   viewer: string;
   session: RelaySession;
+  /** The community UUID the session's transport read from NIP-11, if any. */
+  communityId?: string | undefined;
   /** Aborts when this binding is replaced, so no work outlives its session. */
   controller: AbortController;
   stopLive: () => void;
@@ -2130,6 +2227,8 @@ export class AgentsService extends Service implements Agents {
   private state: AgentsSnapshot;
   /** By origin, so each agent listens in its own community, selected or not. */
   private bound = new Map<string, Bound>();
+  /** The local memberships gateway routing was last told about. */
+  private gatewayKeys = new Set<AgentKey>();
   private readonly runners: AgentRunners;
   private readonly coreMemory: CoreMemoryCache;
   /** Counts list requests, so only the latest one is applied. */
@@ -2347,6 +2446,11 @@ export class AgentsService extends Service implements Agents {
         const session = this.bindingOf(agent)?.session;
         return !channel || !session || session.unattended(channel, live);
       },
+      flat: (agent, channelId) => {
+        const { channelType } =
+          this.channelOf(agent, { tags: [["h", channelId]] }) ?? {};
+        return channelType === "dm" || channelType === "solo";
+      },
       starting: (agent, channelId) =>
         this.bindingOf(agent)?.session.channelWrites.starting(channelId),
       community: (agent) => this.bindingOf(agent),
@@ -2551,7 +2655,6 @@ export class AgentsService extends Service implements Agents {
             identity.owner === agent.owner &&
             originOf(identity.relay) === origin,
         );
-        const found = held.map((identity) => this.agentReadout(identity));
         // Hosted ones and ones on the owner's other devices, as listed here,
         // with their synced instructions where the owner can read them.
         const config = origin ? this.communityConfigs.get(origin) : undefined;
@@ -2567,6 +2670,12 @@ export class AgentsService extends Service implements Agents {
             pubkey: item.pubkey,
             name: item.name,
             type: item.type,
+            modelSettings: {
+              unavailable:
+                item.place === "hosted"
+                  ? "Its provider keeps its model settings"
+                  : "Its model settings are on another device",
+            },
           };
           return read
             ? { ...base, ...read, synced: true }
@@ -2579,10 +2688,18 @@ export class AgentsService extends Service implements Agents {
               };
         };
         if (target === undefined)
-          return [...found, ...(await Promise.all(listed.map(remote)))];
+          return [
+            ...(await Promise.all(
+              held.map((identity) => this.agentReadout(identity)),
+            )),
+            ...(await Promise.all(listed.map(remote))),
+          ];
         // Only the one asked for is read from the relay.
         const readers = [
-          ...found.map((entry) => ({ entry, read: () => entry })),
+          ...held.map((entry) => ({
+            entry,
+            read: () => this.agentReadout(entry),
+          })),
           ...listed.map((entry) => ({ entry, read: () => remote(entry) })),
         ];
         return pick(
@@ -2646,6 +2763,7 @@ export class AgentsService extends Service implements Agents {
         }),
       handoff: (agent, { from, ...wake }) =>
         this.wakeIn(agent.key, wake, { from }),
+      threadsApart: (agent, channelId) => this.threadsApart(agent, channelId),
       instructions: (agent) => this.turnInstructions(agent),
       conversationInstructions: (agent, channelId, root) =>
         this.turnConversationInstructions(agent, channelId, root),
@@ -2682,9 +2800,7 @@ export class AgentsService extends Service implements Agents {
           check(signal);
           if (!binding.session.snapshotRead || !binding.session.relayAuthor)
             throw new Error("Solo workspace authority is unavailable");
-          const preferences = binding.session.soloPreferences;
-          await binding.session.channelKit.refresh({ after: true });
-          check(signal);
+          const preferences = binding.session.sidebarPreferences;
           await preferences.refresh();
           check(signal);
           const state = preferences.snapshot();
@@ -2779,7 +2895,7 @@ export class AgentsService extends Service implements Agents {
                 };
               }
               try {
-                await binding.session.soloPreferences.assign(
+                await binding.session.sidebarPreferences.assign(
                   id,
                   workspace,
                   active,
@@ -3494,16 +3610,88 @@ export class AgentsService extends Service implements Agents {
     added: () => this.tools(),
     repositories: repositoriesContext,
   });
-  wake(key: AgentKey, wake: AgentWake) {
-    const plugin = this.ctx.pluginOwner?.id;
-    if (!plugin) throw new Error("Only a plugin wakes an agent");
-    this.wakeIn(key, wake, { plugin });
+  readonly supportsGuardedWake = true as const;
+  wake(key: AgentKey, wake: AgentWake): void;
+  wake(
+    key: AgentKey,
+    wake: AgentWake,
+    options: Parameters<Agents["wake"]>[2],
+  ): ReturnType<Agents["wake"]>;
+  wake(
+    key: AgentKey,
+    wake: AgentWake,
+    options?: Parameters<Agents["wake"]>[2],
+  ) {
+    const owner = this.ctx.pluginOwner;
+    if (!owner) throw new Error("Only a plugin wakes an agent");
+    const trigger = this.pluginWake(wake, { plugin: owner.id });
+    if (options === undefined) return this.runners.wakeIn(key, trigger);
+    if (typeof options?.current !== "function")
+      throw new Error("A guarded wake needs a current predicate");
+    // Validate before returning a Promise, as with the wake arguments.
+    if (options.signal !== undefined) AbortSignal.any([options.signal]);
+    return this.guardedWake(key, trigger, options);
+  }
+  private async guardedWake(
+    key: AgentKey,
+    trigger: Extract<Trigger, { type: "plugin" }>,
+    options: Parameters<Agents["wake"]>[2],
+  ): ReturnType<Agents["wake"]> {
+    const ctx = this.ctx;
+    const owner = ctx.pluginOwner;
+    if (!owner) throw new Error("Only a plugin wakes an agent");
+    const { signal, current: isCurrent } = options;
+    const agent = this.ready(key);
+    const binding = agent && this.bindingOf(agent);
+    if (!agent || !binding) return { status: "dropped", reason: "unavailable" };
+    const epoch = binding.connection.epoch;
+    const lifetime = new AbortController();
+    let pending = true;
+    const release = ctx.effect(() => () => {
+      if (pending) lifetime.abort();
+    });
+    const available = () => {
+      const current = this.ready(key);
+      const address = { tags: [["h", trigger.channel]] };
+      return (
+        !lifetime.signal.aborted &&
+        ctx.pluginStatus.isActive(owner.id, owner.revision) &&
+        !binding.controller.signal.aborted &&
+        this.bindingOf(agent) === binding &&
+        binding.connection.epoch === epoch &&
+        binding.connection.since !== undefined &&
+        this.communities.snapshot().viewer === binding.viewer &&
+        current?.pubkey === agent.pubkey &&
+        current.owner === agent.owner &&
+        current.type === agent.type &&
+        this.member(current, address) === true &&
+        this.reads({ ...current, pubkey: binding.viewer }, address) === true
+      );
+    };
+    try {
+      return await this.runners.wakeGuarded(
+        key,
+        trigger,
+        { ...(signal ? { signal } : {}), current: isCurrent },
+        available,
+        AbortSignal.any([lifetime.signal, binding.controller.signal]),
+      );
+    } finally {
+      pending = false;
+      release();
+    }
   }
   private wakeIn(
     key: AgentKey,
-    { channel, root, topLevel, text }: AgentWake,
+    wake: AgentWake,
     source: Readonly<{ plugin: string } | { from: HandoffSource }>,
   ) {
+    this.runners.wakeIn(key, this.pluginWake(wake, source));
+  }
+  private pluginWake(
+    { channel, root, topLevel, text }: AgentWake,
+    source: Readonly<{ plugin: string } | { from: HandoffSource }>,
+  ): Extract<Trigger, { type: "plugin" }> {
     if (!channel || !text.trim())
       throw new Error("A wake needs a channel and text");
     // Harnesses find the thread from a well-formed id; any other would leave
@@ -3512,7 +3700,7 @@ export class AgentsService extends Service implements Agents {
       throw new Error("A wake's root must be the thread's 64-hex event id");
     if (topLevel !== undefined && (topLevel !== true || root !== undefined))
       throw new Error("A wake is in a thread or at the top level, not both");
-    this.runners.wakeIn(key, {
+    return {
       type: "plugin",
       ...source,
       channel,
@@ -3521,7 +3709,7 @@ export class AgentsService extends Service implements Agents {
       text,
       id: bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
       at: Date.now(),
-    });
+    };
   }
   snapshot = () => this.state;
   subscribeSteps = (agent: AgentKey, listener: () => void) => {
@@ -4040,23 +4228,48 @@ export class AgentsService extends Service implements Agents {
   private callerTeams(agent: Agent) {
     return visibleTeams(this, this.callerOrigin(agent));
   }
-  private agentReadout(identity: AgentIdentity): AgentReadout {
+  async readModelSettings(key: AgentKey): Promise<AgentModelSettingsReadout> {
+    const identity = this.liveMember(key);
+    if (!identity || identity.deleting)
+      return { unavailable: "No such agent on this device" };
+    return (await this.agentReadout(identity)).modelSettings;
+  }
+  private async agentReadout(identity: Member): Promise<AgentReadout> {
     const kind = this.types().find((type) => type.key === identity.type);
     const saved = this.settingsOf(identity);
     const editor = this.editorConfig(identity, saved.config as object);
     const config = editor?.config ?? saved.config;
+    const confirmed = editor && "synced" in editor ? editor.synced : undefined;
     const side = this.configBinding(identity).instructions;
     const synced = !!side && isSynced(this.configStore, side);
+    const head = synced ? this.configStore.state(side.subject).head : undefined;
+    let execution: AgentModelSettingsContext["execution"] = "local";
+    if (kind?.execution) {
+      try {
+        execution = (await this.executions.inspect(identity.key))
+          ? "remote"
+          : "local";
+      } catch {
+        execution = "unavailable";
+      }
+    }
     const base = {
       pubkey: identity.pubkey,
       name: identity.name,
       type: identity.type,
+      modelSettings: editor?.problem
+        ? { unavailable: "Its synced config could not be read" }
+        : kind?.readModelSettings
+          ? kind.readModelSettings(config, {
+              execution,
+              ...(confirmed && { synced: confirmed }),
+            })
+          : { unavailable: "Its type does not expose model settings here" },
     };
     // Synced instructions that are deleted, invalid or unreadable are not
     // empty ones.
     if (synced && editor?.problem)
       return { ...base, unavailable: editor.problem };
-    const head = synced ? this.configStore.state(side.subject).head : undefined;
     return {
       ...base,
       instructions: kind?.adopt
@@ -4826,6 +5039,24 @@ export class AgentsService extends Service implements Agents {
       runtime: agent.type,
       prior: this.rowOf(origin, pubkey)?.prior,
     });
+  }
+  /** Whether the agent's threads in the channel have sessions of their own,
+   * apart from its channel-level conversation: only where its type says it
+   * runs one session per thread, outside a DM, Solo chat or huddle room (whose
+   * text turns harnesses run in the room's one session). Any type that
+   * offers session controls gets this; one that does not keeps the channel
+   * one conversation. A channel not known here yet is undefined, which the
+   * tools also treat as one conversation. */
+  private threadsApart(agent: Agent, channelId: string) {
+    const type = this.types().find((kind) => kind.key === agent.type);
+    if (type?.sessionControls?.scope(agent) !== "thread") return false;
+    const summary = this.channelOf(agent, { tags: [["h", channelId]] });
+    if (!summary) return undefined;
+    return (
+      summary.channelType !== "dm" &&
+      summary.channelType !== "solo" &&
+      !isHuddleRoom(summary.description)
+    );
   }
   private sessionPlace(
     agent: Agent,
@@ -6546,6 +6777,7 @@ export class AgentsService extends Service implements Agents {
       if (this.storage.get(recordKey(key)) !== null)
         await removeRecord(this.storage, key);
       await removeSessionPrompts(this.storage, key);
+      await removeStandaloneSessions(this.storage, key);
     }
     const { [key]: _, ...others } = this.records;
     this.records = next ? { ...others, [key]: next } : others;
@@ -6840,7 +7072,11 @@ export class AgentsService extends Service implements Agents {
     );
     const resolved = this.resolve(identity, local);
     if (resolved.ok)
-      return { config: resolved.config, base: Object.freeze(base) };
+      return {
+        config: resolved.config,
+        base: Object.freeze(base),
+        ...(resolved.synced && { synced: resolved.synced }),
+      };
     // Without a usable confirmed copy, a synced side's local field is stale:
     // the editor shows the problem instead of it.
     const schema = this.configAgent(identity, local).schema ?? {};
@@ -6881,6 +7117,33 @@ export class AgentsService extends Service implements Agents {
     return binding?.scope === relayPartition(origin ?? "", owner)
       ? binding
       : undefined;
+  }
+  /** Tells gateway routing each local membership and the community ID its
+   * live relay session's transport read. Hosted agents never route there. */
+  private syncGateway(identities: readonly Member[]) {
+    if (!gatewayRoutes.configured) return;
+    const types = new Map(this.types().map((type) => [type.key, type]));
+    const present = new Set<AgentKey>();
+    for (const identity of identities) {
+      const origin = originOf(identity.relay);
+      if (identity.deleting || !origin || types.get(identity.type)?.remote)
+        continue;
+      const binding = this.bindingOf(identity);
+      present.add(identity.key);
+      gatewayRoutes.setMembership({
+        key: identity.key,
+        origin,
+        owner: identity.owner,
+        pubkey: identity.pubkey,
+        community: binding && {
+          id: binding.communityId,
+          session: binding.session,
+        },
+      });
+    }
+    for (const key of this.gatewayKeys)
+      if (!present.has(key)) gatewayRoutes.removeMembership(key);
+    this.gatewayKeys = present;
   }
   /** Whether the agent stays running: it is the viewer's, and its community is
    * joined and not disconnected. A reconnect does not stop it. */
@@ -7143,6 +7406,7 @@ export class AgentsService extends Service implements Agents {
             origin: snapshot.origin,
             viewer: snapshot.viewer,
             session: snapshot.session,
+            communityId: snapshot.communityId,
             controller: new AbortController(),
           }
         : undefined;
@@ -7335,6 +7599,7 @@ export class AgentsService extends Service implements Agents {
         })),
       new Map(this.types().map((type) => [type.key, type])),
     );
+    this.syncGateway(identities);
     const left = this.runners.interrupted();
     // Only the copy that holds an agent may resume or forget its turns.
     const interrupted = running.filter(

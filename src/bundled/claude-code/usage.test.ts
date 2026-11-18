@@ -224,6 +224,23 @@ it("keeps only sessions Buzz started for this agent", () => {
   ).not.toHaveProperty("root");
 });
 
+/** The first prompt of a watch's or timer's one-off turn: it opens with no
+ * context, so nothing in the file says whose it is. */
+const timerPrompt = JSON.stringify({
+  type: "user",
+  timestamp: at(0),
+  message: { role: "user", content: "Timer: daily\n\nReport ops in #ops." },
+});
+
+it("counts a one-off turn's session only when it is recorded as the agent's", () => {
+  const file = `${timerPrompt}\n${reply(1000, "m1", usage(1, 1))}`;
+  expect(sessionUsage("s", file, new Map(), agent, false)).toBeUndefined();
+  const session = sessionUsage("s", file, new Map(), agent, false, true);
+  expect(session).toMatchObject({ id: "s", gaps: [] });
+  expect(session).not.toHaveProperty("channelId");
+  expect(session?.observations).toHaveLength(1);
+});
+
 let home: string | undefined;
 afterEach(() => {
   if (home) rmSync(home, { recursive: true, force: true });
@@ -281,6 +298,27 @@ it("finds the agent's sessions with the manifest's processes", async () => {
       new AbortController().signal,
     ),
   ).toEqual([]);
+});
+
+it("reads the one-off turns recorded for the agent", async () => {
+  home = mkdtempSync(join(tmpdir(), "claude-usage-"));
+  const project = join(home, ".claude/projects/-Users-me--buzz");
+  mkdirSync(project, { recursive: true });
+  const work = reply(1000, "m1", usage(1, 2));
+  writeFileSync(join(project, "once.jsonl"), `${timerPrompt}\n${work}`);
+  // Another agent's one-off turn in the same workspace, never recorded here.
+  writeFileSync(join(project, "theirs.jsonl"), `${timerPrompt}\n${work}`);
+  const sessions = await readUsage(
+    desktop(home),
+    "~/.buzz",
+    agent,
+    [],
+    0,
+    new AbortController().signal,
+    ["once", "gone"],
+  );
+  expect(sessions.map((session) => session.id)).toEqual(["once"]);
+  expect(sessions[0]).not.toHaveProperty("channelId");
 });
 
 /** A subagent's reply padded with `char` to about `bytes` in its file. */

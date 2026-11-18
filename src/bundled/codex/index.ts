@@ -3,7 +3,7 @@ import { CODEX_HOOK_EVENTS } from "./hook-bridge";
 import { repositoriesContext } from "../../features/communities/repositories";
 import { isTauri } from "@tauri-apps/api/core";
 import { pubkeyOf } from "../../features/agents/membership";
-import { ownerReads } from "../../features/agents/reads";
+import { ownerReads, readyOwnerReads } from "../../features/agents/reads";
 import type { PluginModule } from "../../plugins/api";
 import { CodexLogoIcon } from "../../shared/design-system/icons";
 import { type Config, config, defaults, validWorkspace } from "./config";
@@ -34,6 +34,12 @@ export const apply: PluginModule["apply"] = (ctx) => {
     start,
     ctx.agents.storage,
     setup,
+    {
+      request: (input) => ctx.host.request(input),
+      ...(ctx.host.requestBytes
+        ? { requestBytes: ctx.host.requestBytes.bind(ctx.host) }
+        : {}),
+    },
   );
   const typeKey = `${ctx.pluginOwner?.id ?? "buzz.codex"}/${TYPE_ID}`;
   const runtime = new CodexRuntime(
@@ -72,6 +78,8 @@ export const apply: PluginModule["apply"] = (ctx) => {
     ctx.host,
     (pubkey) => ctx.agents.handle(pubkey),
     ctx.host.resolveDirectory?.bind(ctx.host),
+    (agent, signal, channelId) =>
+      readyOwnerReads(ctx.agents.relay(agent.key), agent, signal, channelId),
   );
   // Failed turns' notices link to where Codex signs in.
   runtime.explain = (notice) =>
@@ -181,6 +189,8 @@ export const apply: PluginModule["apply"] = (ctx) => {
     description:
       "Codex on this computer, using its native coding tools and your account.",
     defaults: () => ({ config: { ...defaults } }),
+    readModelSettings: (saved, context) =>
+      providerController.readModelSettings(saved, context),
     Create,
     CreateModel,
     createModelReportsReadiness: true,
@@ -215,7 +225,7 @@ export const apply: PluginModule["apply"] = (ctx) => {
       };
     },
     describeMigration: (saved) => {
-      const { model, effort, scope } = config(saved);
+      const { model, effort, scope, voice } = config(saved);
       return [
         { id: "model", label: "Model", isOverride: Boolean(model.trim()) },
         {
@@ -223,6 +233,7 @@ export const apply: PluginModule["apply"] = (ctx) => {
           label: "Thinking",
           isOverride: Boolean(effort),
         },
+        { id: "voice", label: "Voice", isOverride: Boolean(voice) },
         {
           id: "sessions",
           label: "Sessions",

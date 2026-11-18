@@ -93,16 +93,27 @@ function fixture(projectName = "Work") {
     };
     return saved;
   });
+  const read = vi.fn(async () => saved);
   const store = () =>
     createSidebarPreferencesStore({
-      read: async () => saved,
+      read,
       available: true,
       write,
       writeStar: async () => [],
       removeSection: remove,
-      // Groups-only chats have no Messages sort coordinate.
-      groupsOnly: true,
+      writeSort: async () => ({}),
+      writeOrder: order,
     });
+  const order = vi.fn(async (ids: readonly string[]) => {
+    saved = {
+      ...saved,
+      sections: ids.flatMap((id, order) => {
+        const section = saved.sections.find((section) => section.id === id);
+        return section ? [{ ...section, order }] : [];
+      }),
+    };
+    return saved;
+  });
   const onNew = vi.fn();
   const channels = {
     status: "ready",
@@ -128,7 +139,7 @@ function fixture(projectName = "Work") {
         {
           ...owner.session,
           channelDetails: details,
-          soloPreferences: preferences,
+          sidebarPreferences: preferences,
           unread,
           canvas: { available: false },
           channels: { list: () => channels, subscribeList: () => () => {} },
@@ -149,10 +160,81 @@ function fixture(projectName = "Work") {
     view,
     write,
     remove,
+    order,
+    read,
+    setSaved: (value: SidebarPreferences) => {
+      saved = value;
+    },
     onNew,
     saved: () => saved,
   };
 }
+
+it("moves workspaces with the section menu, keeps collapse and filing, and retries failed order", async () => {
+  const h = fixture();
+  h.setSaved({
+    ...h.saved(),
+    sections: [
+      { id: "work", name: "Work", order: 0 },
+      { id: "home", name: "Home", order: 1 },
+    ],
+    assignments: { chat: "work", other: "home" },
+  });
+  const first = h.store();
+  const user = userEvent.setup();
+  const mounted = render(h.view(first.queries));
+  const heading = await screen.findByRole("button", {
+    name: "Home",
+  });
+  await user.click(heading);
+  await user.click(screen.getByRole("button", { name: "Actions for Home" }));
+  expect(
+    await screen.findByRole("menuitem", { name: "Move down" }),
+  ).toHaveAttribute("aria-disabled", "true");
+  h.order.mockRejectedValueOnce(new Error("Order was refused"));
+  await user.click(screen.getByRole("menuitem", { name: "Move up" }));
+  const error = await screen.findByRole("alert");
+  expect(error).toHaveTextContent(
+    "Couldn’t save the move for Home. Order was refused",
+  );
+  expect(first.queries.snapshot().data?.sections.map(({ id }) => id)).toEqual([
+    "work",
+    "home",
+  ]);
+  const retry = within(error).getByRole("button", { name: "Retry move" });
+  expect(retry).toBeEnabled();
+  h.read.mockRejectedValueOnce(new Error("Saved preferences unavailable"));
+  await act(() => first.queries.refresh());
+  expect(retry).toBeDisabled();
+  expect(error).toHaveTextContent(
+    "Refresh saved workspace preferences before retrying this move.",
+  );
+  expect(h.order).toHaveBeenCalledOnce();
+  await user.click(screen.getByRole("button", { name: "Retry workspaces" }));
+  await waitFor(() => expect(retry).toBeEnabled());
+  expect(error).not.toHaveTextContent("Refresh saved workspace preferences");
+  const leaving = document.createElement("div");
+  leaving.setAttribute("inert", "");
+  leaving.setAttribute("aria-hidden", "true");
+  const header = heading.closest(PROJECT_HEADER);
+  if (!header) throw new Error("Missing workspace header");
+  leaving.append(header.cloneNode(true));
+  mounted.container.prepend(leaving);
+  await user.click(retry);
+  await waitFor(() =>
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+  );
+  expect(h.order).toHaveBeenCalledTimes(2);
+  expect(heading).toHaveFocus();
+  expect(first.queries.snapshot().data?.sections.map(({ id }) => id)).toEqual([
+    "home",
+    "work",
+  ]);
+  expect(heading).toHaveAttribute("aria-expanded", "false");
+  expect(h.write).not.toHaveBeenCalled();
+  mounted.unmount();
+  first.dispose();
+});
 
 it("creates and moves through the relay service, then restores in a fresh store", async () => {
   const h = fixture();
@@ -175,10 +257,7 @@ it("creates and moves through the relay service, then restores in a fresh store"
   await user.click(
     await screen.findByRole("menuitem", { name: "New workspace" }),
   );
-  await user.type(
-    screen.getByRole("textbox", { name: "Workspace name" }),
-    "Projects",
-  );
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Projects");
   await user.click(screen.getByRole("button", { name: "Create and move" }));
   await waitFor(() =>
     expect(h.write).toHaveBeenCalledWith(
@@ -750,7 +829,7 @@ it("caps each workspace, keeps pinned chats, and remembers Show more", async () 
     screen.getByRole("button", { name: "Show more chats in Chats" }),
   );
   expect(titles()).toHaveLength(SOLO_CHAT_CAP + SOLO_CHAT_STEP + 1);
-  // The last step shows what remains, then only Show less is left.
+  // The last step shows what remains, then only Show fewer is left.
   await user.click(
     screen.getByRole("button", { name: "Show more chats in Chats" }),
   );
@@ -768,7 +847,7 @@ it("caps each workspace, keeps pinned chats, and remembers Show more", async () 
   expect(titles()).toHaveLength(SOLO_CHAT_CAP + 1);
 });
 
-it("offers Show less beside Show more and always folds back to the cap", async () => {
+it("offers Show fewer beside Show more and always folds back to the cap", async () => {
   const h = fixture();
   const user = userEvent.setup();
   const chats = Array.from(
@@ -794,9 +873,11 @@ it("offers Show less beside Show more and always folds back to the cap", async (
     screen.getByRole("button", { name: "Show more chats in Chats" }),
   );
   expect(titles()).toHaveLength(SOLO_CHAT_CAP + SOLO_CHAT_STEP * 2);
-  const row = screen.getByRole("button", {
+  const fold = screen.getByRole("button", {
     name: "Show fewer chats in Chats",
-  }).parentElement;
+  });
+  expect(fold).toHaveTextContent(/^Show fewer$/);
+  const row = fold.parentElement;
   expect(
     within(row as HTMLElement).getByRole("button", {
       name: "Show more chats in Chats",
@@ -815,7 +896,7 @@ it("offers no Show more when a workspace fits under the cap", async () => {
   expect(document.querySelector("[data-solo-show-more]")).toBeNull();
 });
 
-it("keeps keyboard focus on the row when Show more or Show less is spent", async () => {
+it("keeps keyboard focus on the row when Show more or Show fewer is spent", async () => {
   const h = fixture();
   const user = userEvent.setup();
   const chats = Array.from({ length: SOLO_CHAT_CAP + 2 }, (_, index) => ({
@@ -837,7 +918,7 @@ it("keeps keyboard focus on the row when Show more or Show less is spent", async
   ).toHaveFocus();
 });
 
-it("moves focus to the last chat when Show less leaves nothing to fold", async () => {
+it("moves focus to the last chat when Show fewer leaves nothing to fold", async () => {
   const h = fixture();
   const user = userEvent.setup();
   const chats = (pinned: boolean) =>
@@ -964,7 +1045,7 @@ it("keeps a pinned chat past the expanded limit held after a partial fold", asyn
   expect(kept).toHaveFocus();
 });
 
-it("offers Show less for retained chats in a never-expanded workspace", async () => {
+it("offers Show fewer for retained chats in a never-expanded workspace", async () => {
   const h = fixture();
   const user = userEvent.setup();
   const chats = (pinned: boolean) =>
@@ -1004,12 +1085,12 @@ it("rejects a late personal move through the same owner used by menu selections 
       muted: [],
     }),
     available: true,
-    groupsOnly: true,
+    writeStar: async () => [],
     write,
   });
   try {
     await preferences.queries.ensure();
-    Object.assign(h.session, { soloPreferences: preferences.queries });
+    Object.assign(h.session, { sidebarPreferences: preferences.queries });
     const channel = h.session.channels
       .list()
       .channels.find((item) => item.id === "owned");

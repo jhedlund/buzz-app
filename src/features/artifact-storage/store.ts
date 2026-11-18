@@ -2,9 +2,11 @@ import type { JsonValue } from "../navigation/targets";
 import { relayPartition } from "../relay/partition";
 import type {
   ArtifactBatch,
+  ArtifactCollectionChange,
   ArtifactCollectionDefinition,
   ArtifactEntry,
   ArtifactImport,
+  ArtifactIndex,
   ArtifactPage,
   ArtifactPageQuery,
   HostArtifactCollection,
@@ -21,6 +23,74 @@ type Row = {
   id: string;
 };
 type StoredPreference = { value: JsonValue };
+
+// Bound both transaction hints and queued delivery, including unusually long IDs.
+const MAX_CHANGE_IDS = 512;
+const MAX_CHANGE_CHARACTERS = 16_384;
+function changeBuffer() {
+  let ids = new Set<string>();
+  let characters = 0;
+  let reset = false;
+  return {
+    add(change: ArtifactCollectionChange) {
+      if (reset) return;
+      if ("reset" in change) reset = true;
+      else
+        for (const id of change.ids) {
+          if (ids.has(id)) continue;
+          characters += id.length;
+          if (
+            ids.size === MAX_CHANGE_IDS ||
+            characters > MAX_CHANGE_CHARACTERS
+          ) {
+            reset = true;
+            break;
+          }
+          ids.add(id);
+        }
+      if (reset) ids.clear();
+    },
+    take(): ArtifactCollectionChange | undefined {
+      const change = reset
+        ? Object.freeze({ reset: true as const })
+        : ids.size
+          ? Object.freeze({ ids: Object.freeze([...ids]) })
+          : undefined;
+      ids = new Set();
+      characters = 0;
+      reset = false;
+      return change;
+    },
+  };
+}
+
+function receivedChange(data: unknown): ArtifactCollectionChange | undefined {
+  if (
+    data &&
+    typeof data === "object" &&
+    "version" in data &&
+    data.version === 1 &&
+    "change" in data
+  ) {
+    const change = data.change;
+    // Known metadata-only commits still notify the original subscribe API.
+    if (change === null) return;
+    if (
+      change &&
+      typeof change === "object" &&
+      "ids" in change &&
+      Array.isArray(change.ids) &&
+      change.ids.length <= MAX_CHANGE_IDS &&
+      change.ids.every((id) => typeof id === "string" && id.length > 0)
+    ) {
+      const buffer = changeBuffer();
+      buffer.add({ ids: change.ids });
+      return buffer.take();
+    }
+  }
+  // Includes legacy null broadcasts and messages from an unknown host version.
+  return { reset: true };
+}
 
 function sameStoredValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
@@ -222,6 +292,26 @@ export function createArtifactStore(viewer: string, relay: string) {
     let disposed = false;
     const lifetime = new AbortController();
     const listeners = new Set<() => void>();
+    const changeListeners = new Set<
+      (change: ArtifactCollectionChange) => void
+    >();
+    const pending = changeBuffer();
+    let scheduled = false;
+    const notifyChanges = (change: ArtifactCollectionChange | undefined) => {
+      if (disposed || !change || !changeListeners.size) return;
+      pending.add(change);
+      if (scheduled) return;
+      scheduled = true;
+      queueMicrotask(() => {
+        scheduled = false;
+        const hint = pending.take();
+        if (!hint || disposed) return;
+        for (const listener of changeListeners)
+          queueMicrotask(() => {
+            if (!disposed && changeListeners.has(listener)) listener(hint);
+          });
+      });
+    };
     const channelName = `${DB}:${JSON.stringify(prefix)}`;
     const channel = new BroadcastChannel(channelName);
     const changed = () => {
@@ -230,14 +320,31 @@ export function createArtifactStore(viewer: string, relay: string) {
           if (!disposed && listeners.has(listener)) listener();
         });
     };
-    channel.onmessage = changed;
-    const publish = () => {
+    channel.onmessage = (event) => {
+      changed();
+      notifyChanges(receivedChange(event.data));
+    };
+    const resetChanges = () => notifyChanges({ reset: true });
+    channel.onmessageerror = resetChanges;
+    const resume = () => {
+      if (document.visibilityState === "visible") resetChanges();
+    };
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) resetChanges();
+    };
+    if (typeof window !== "undefined") {
+      document.addEventListener("visibilitychange", resume);
+      window.addEventListener("pageshow", restore);
+    }
+    const publish = (change?: ArtifactCollectionChange) => {
+      const message = { version: 1, change: change ?? null };
       if (!disposed) {
         changed();
-        channel.postMessage(null);
+        notifyChanges(change);
+        channel.postMessage(message);
       } else {
         const notification = new BroadcastChannel(channelName);
-        notification.postMessage(null);
+        notification.postMessage(message);
         notification.close();
       }
     };
@@ -252,7 +359,7 @@ export function createArtifactStore(viewer: string, relay: string) {
       then(
         entries.index("record").getAllKeys(IDBKeyRange.only(key(row.id))),
         (keys) => {
-          for (const old of keys) entries.delete(old);
+          const projected = new Map<string, ArtifactIndex>();
           for (const index of definition.project({
             record: row.record,
             ...(preference !== undefined ? { preference } : {}),
@@ -263,12 +370,26 @@ export function createArtifactStore(viewer: string, relay: string) {
               typeof index.order !== "string"
             )
               throw new Error("Invalid artifact index entry");
-            entries.put({ ...index, scope, collection, id: row.id });
+            projected.set(
+              JSON.stringify([
+                ...prefix,
+                index.index,
+                index.value,
+                index.order,
+                row.id,
+              ]),
+              index,
+            );
           }
+          for (const old of keys)
+            if (!projected.delete(JSON.stringify(old))) entries.delete(old);
+          for (const index of projected.values())
+            entries.put({ ...index, scope, collection, id: row.id });
           next();
         },
       );
     }
+    let upgraded = false;
     const ready = transact<void>(
       "readwrite",
       STORES,
@@ -283,6 +404,7 @@ export function createArtifactStore(viewer: string, relay: string) {
           }
           if (schema?.version > definition.version)
             throw new Error("Artifact collection requires a newer plugin");
+          upgraded = !!schema;
           metadata.delete(key("source"));
           metadata.delete(key("refresh"));
           metadata.delete(key("checkpoint"));
@@ -310,7 +432,9 @@ export function createArtifactStore(viewer: string, relay: string) {
         });
       },
       lifetime.signal,
-    );
+    ).then(() => {
+      if (upgraded) publish({ reset: true });
+    });
     // Keep an unopened handle's initialization rejection observable by its first operation.
     void ready.catch(() => {});
     async function run<T>(
@@ -394,6 +518,7 @@ export function createArtifactStore(viewer: string, relay: string) {
         preference: JsonValue | undefined,
       ) => { row: Row; preference?: JsonValue },
       next: () => void,
+      changes: ReturnType<typeof changeBuffer>,
     ) {
       if (!id) throw new Error("Artifact identity is empty");
       then(tx.objectStore("records").get(key(id)), (saved: Row | undefined) => {
@@ -422,6 +547,7 @@ export function createArtifactStore(viewer: string, relay: string) {
               return;
             }
             tx.objectStore("records").put(result.row);
+            changes.add({ ids: [id] });
             if (result.preference !== undefined)
               tx.objectStore("preferences").put({
                 scope,
@@ -488,6 +614,13 @@ export function createArtifactStore(viewer: string, relay: string) {
           listeners.delete(listener);
         };
       },
+      subscribeChanges(listener) {
+        if (disposed) throw new Error("Artifact collection closed");
+        changeListeners.add(listener);
+        return () => {
+          changeListeners.delete(listener);
+        };
+      },
       preferences: {
         get: (id) =>
           run<JsonValue | undefined>(
@@ -500,6 +633,7 @@ export function createArtifactStore(viewer: string, relay: string) {
               ),
           ),
         async update(id, change) {
+          const changes = changeBuffer();
           await run<void>("readwrite", STORES, (tx, then, done) =>
             mutate(
               tx,
@@ -507,12 +641,14 @@ export function createArtifactStore(viewer: string, relay: string) {
               id,
               (row, current) => ({ row, preference: change(current) }),
               () => done(),
+              changes,
             ),
           );
-          publish();
+          publish(changes.take());
         },
       },
       async importBatch(batch: ArtifactImport) {
+        const changes = changeBuffer();
         await run<void>("readwrite", STORES, (tx, then, done) => {
           const jobs: (() => void)[] = [];
           const next = series(jobs);
@@ -532,6 +668,7 @@ export function createArtifactStore(viewer: string, relay: string) {
                         },
                 }),
                 next,
+                changes,
               ),
             );
           for (const pref of batch.preferences ?? [])
@@ -545,6 +682,7 @@ export function createArtifactStore(viewer: string, relay: string) {
                   preference: current === undefined ? pref.value : current,
                 }),
                 next,
+                changes,
               ),
             );
           jobs.push(() => {
@@ -559,7 +697,7 @@ export function createArtifactStore(viewer: string, relay: string) {
           });
           next();
         });
-        publish();
+        publish(changes.take());
       },
       imported: (marker) =>
         run<boolean>("readonly", ["metadata"], (tx, then, done) =>
@@ -691,6 +829,7 @@ export function createArtifactStore(viewer: string, relay: string) {
         publish();
       },
       async applyBatch(batch: ArtifactBatch, signal) {
+        const changes = changeBuffer();
         await run<void>(
           "readwrite",
           STORES,
@@ -736,6 +875,7 @@ export function createArtifactStore(viewer: string, relay: string) {
                     };
                   },
                   next,
+                  changes,
                 ),
               );
             for (const availability of batch.availability ?? [])
@@ -761,6 +901,7 @@ export function createArtifactStore(viewer: string, relay: string) {
                     };
                   },
                   next,
+                  changes,
                 ),
               );
             jobs.push(() => done());
@@ -768,12 +909,18 @@ export function createArtifactStore(viewer: string, relay: string) {
           },
           signal,
         );
-        publish();
+        publish(changes.take());
       },
       close() {
         lifetime.abort(new Error("Artifact collection closed"));
         disposed = true;
         listeners.clear();
+        changeListeners.clear();
+        pending.take();
+        if (typeof window !== "undefined") {
+          document.removeEventListener("visibilitychange", resume);
+          window.removeEventListener("pageshow", restore);
+        }
         channel.close();
         collections.delete(handle);
       },

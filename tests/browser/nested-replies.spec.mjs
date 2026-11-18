@@ -4,6 +4,7 @@ import { open } from "./timeline.mjs";
 import { settlePanelMotion } from "./navigation.mjs";
 import { generateSecretKey, getPublicKey } from "nostr-tools";
 import { animationsSettled } from "./animations.mjs";
+import { chooseDefaultSkinTone } from "./skin-tone.mjs";
 
 test.use({
   productionBroker: true,
@@ -479,6 +480,7 @@ test("branch hooks land on each reply's avatar across sides and row shapes", asy
   );
   const emoji = post("Emoji branch", false);
   const emojiReply = post("🎉", false, emoji.id);
+  await chooseDefaultSkinTone(page);
   await open(page, app);
   app.serveProfile(agent, { name: "Hook Agent", is_agent: true });
   await page.setViewportSize({ width: 1280, height: 1600 });

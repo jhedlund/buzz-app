@@ -1,4 +1,9 @@
 import type { AgentExecutionBinding } from "../../features/agents/execution";
+import {
+  readModelSettings,
+  type AgentModelResolution,
+  type AgentModelSettingsContext,
+} from "../../features/agents/model-settings";
 import type { AgentKey } from "../../features/agents/membership";
 import activityStyles from "../../features/agents/ActivityLayout.module.css";
 import { formatItemTimestamp } from "../../shared/datetime";
@@ -57,50 +62,108 @@ import {
   config as readConfig,
   defaults,
   resolveModel,
+  resolveEffort,
   effortName,
   validWorkspace,
   type Config,
   type Model,
 } from "./config";
-import { AppServer, listModels, needsSignIn, type Spawn } from "./rpc";
+import {
+  AppServer,
+  listModels,
+  voiceCatalog,
+  needsSignIn,
+  type Spawn,
+} from "./rpc";
 import type { CodexRuntime, SavedConversation } from "./runtime";
 import type { CodexSetup } from "./setup";
 import { readTranscript, TURN_LIMIT } from "./transcript";
+import { VoicePreview } from "./VoicePreview";
+import {
+  discoverPreviews,
+  type PreviewAuth,
+  type PreviewHost,
+} from "./voice-preview";
 
 const label = ({ channelId, name, root }: SavedConversation) =>
   `${name || channelId.slice(0, 8)} · ${root ? `thread ${root.slice(0, 8)}` : "channel"}`;
 
 type Catalog = {
+  previews?: Record<string, string> | undefined;
+  accents?: Record<string, string> | undefined;
+  voices?: string[] | undefined;
+  defaultVoice?: string | undefined;
   models: Model[];
 };
 type ProviderDefaults = Readonly<{ model: string; effort: string }>;
 type ProviderState = AgentProviderSnapshot &
   Readonly<{
     checking: boolean;
+    previewChecking?: boolean;
+    voiceChecking?: boolean;
     data: Catalog | undefined;
     error: string;
     defaults: ProviderDefaults;
   }>;
+function voiceConfig(current: Config, voice: Config["voice"]): Config {
+  const next = readConfig({ ...current, voice });
+  return onRecommended(next) ? next : offRecommended(next);
+}
 const STORAGE_KEY = "buzz.codex.provider-defaults.v1";
 const SIGN_IN_ERROR = "Codex needs you to sign in.";
 const NOT_INSTALLED = "The Codex integration isn't installed yet.";
 const CONVERSATION_LIMIT = 30;
 /** Read-only setup/catalog discovery uses the same declared native transport. */
-async function catalog(spawn: Spawn, signal: AbortSignal) {
+async function catalog(spawn: Spawn, signal: AbortSignal, host?: PreviewHost) {
   const rpc = new AppServer();
   const abort = () => {
     void rpc.close();
   };
   signal.addEventListener("abort", abort, { once: true });
+  const close = async () => {
+    signal.removeEventListener("abort", abort);
+    await rpc.close();
+  };
+  let detached = false;
   try {
     signal.throwIfAborted();
     await rpc.open(spawn, defaults.workspace);
     signal.throwIfAborted();
     if (await needsSignIn(rpc)) throw new Error(SIGN_IN_ERROR);
-    return { models: await listModels(rpc) };
+    const models = await listModels(rpc);
+    // Optional voice RPCs must not hold text-model readiness.
+    const voices = Promise.all([
+      voiceCatalog(rpc).catch(() => undefined),
+      rpc
+        .request<{ config: { realtime?: { voice?: string } } }>("config/read", {
+          includeLayers: false,
+        })
+        .catch(() => undefined),
+    ]).then(([voices, config]) => ({
+      voices: voices?.v3,
+      defaultVoice: config
+        ? (config.config?.realtime?.voice ?? voices?.defaultV1)
+        : undefined,
+    }));
+    const auth = host
+      ? rpc
+          .request<PreviewAuth>("getAuthStatus", {
+            includeToken: true,
+            refreshToken: false,
+          })
+          .catch(() => undefined)
+      : Promise.resolve(undefined);
+    const previews = Promise.all([voices, auth])
+      .finally(close)
+      .then(([, auth]) => {
+        signal.throwIfAborted();
+        return host ? discoverPreviews(auth, host) : undefined;
+      })
+      .catch(() => undefined);
+    detached = true;
+    return { models, voices, previews };
   } finally {
-    signal.removeEventListener("abort", abort);
-    await rpc.close();
+    if (!detached) await close();
   }
 }
 
@@ -116,6 +179,7 @@ export class CodexProvider {
     private readonly spawn: Spawn,
     private readonly storage: AgentStore = localStore(),
     private readonly setup?: CodexSetup,
+    readonly previewHost?: PreviewHost,
   ) {
     this.state = Object.freeze({
       readiness: "checking",
@@ -154,11 +218,14 @@ export class CodexProvider {
     return pending;
   }
   private async runCheck() {
+    this.abort?.abort();
     const abort = new AbortController();
     this.abort = abort;
     this.set({
       ...(this.state.data ? {} : { readiness: "checking" as const }),
       checking: true,
+      previewChecking: false,
+      voiceChecking: false,
       error: "",
     });
     try {
@@ -171,13 +238,33 @@ export class CodexProvider {
               ? SIGN_IN_ERROR
               : status.message,
         );
-      const data = await catalog(this.spawn, abort.signal);
+      const { previews, voices, ...data } = await catalog(
+        this.spawn,
+        abort.signal,
+        this.previewHost,
+      );
       if (this.abort === abort) {
         this.set({
           readiness: "ready",
           checking: false,
+          previewChecking: !!previews,
+          voiceChecking: true,
           data,
           error: "",
+        });
+        void voices.then((voices) => {
+          if (this.abort === abort && !abort.signal.aborted)
+            this.set({
+              data: { ...data, ...this.state.data, ...voices },
+              voiceChecking: false,
+            });
+        });
+        void previews?.then((previews) => {
+          if (this.abort === abort && !abort.signal.aborted)
+            this.set({
+              data: { ...data, ...this.state.data, ...previews },
+              previewChecking: false,
+            });
         });
       }
     } catch (error) {
@@ -195,8 +282,6 @@ export class CodexProvider {
           data: undefined,
           error: reason,
         });
-    } finally {
-      if (this.abort === abort) this.abort = undefined;
     }
   }
   /** Settles once the defaults are saved, and only then uses them; rejects,
@@ -278,6 +363,70 @@ export class CodexProvider {
           ? preferred
           : (selected?.defaultReasoningEffort ?? "");
     return { ...explicit, model, effort };
+  }
+  /** Read the same next-turn selection without refreshing the catalog. */
+  readModelSettings(
+    raw: unknown,
+    { execution = "local", synced }: Partial<AgentModelSettingsContext> = {},
+  ) {
+    const saved = readConfig(raw);
+    const recommended = onRecommended(raw);
+    const settings = this.resolve(raw, execution !== "local");
+    const candidate = recommended ? this.recommended() : null;
+    const source = (field: "model" | "effort") =>
+      saved[field]
+        ? ("configured" as const)
+        : candidate
+          ? ("recommended" as const)
+          : field === "effort" && settings.effort !== this.state.defaults.effort
+            ? ("provider" as const)
+            : ("device" as const);
+    const unavailable =
+      execution === "unavailable"
+        ? "execution-unavailable"
+        : execution === "remote"
+          ? "remote"
+          : recommended && candidate === undefined
+            ? "not-loaded"
+            : undefined;
+    const data = this.state.data;
+    const model = resolveModel(settings.model, data?.models ?? []);
+    const selected = data?.models.find((row) => row.model === model);
+    const missing = data
+      ? "unknown"
+      : this.state.readiness === "attention"
+        ? "unknown"
+        : "not-loaded";
+    const modelResolution: AgentModelResolution = unavailable
+      ? { unavailable }
+      : data && !selected
+        ? { unavailable: "unknown" }
+        : model
+          ? {
+              value: model,
+              source: settings.model ? source("model") : "provider",
+            }
+          : { unavailable: missing };
+    const effort = selected
+      ? resolveEffort(selected, settings.effort)
+      : candidate?.effort;
+    return readModelSettings(saved, {
+      recommended,
+      resolved: {
+        model: modelResolution,
+        effort: unavailable
+          ? { unavailable }
+          : synced?.effort && effort && effort !== synced.effort
+            ? { unavailable: "unsupported" }
+            : effort
+              ? {
+                  value: effort,
+                  source:
+                    effort === settings.effort ? source("effort") : "provider",
+                }
+              : { unavailable: missing },
+      },
+    });
   }
   dispose() {
     this.offSetup?.();
@@ -701,7 +850,6 @@ export function createTabs(
           value={current.model}
           defaultModel={catalogModel(providerDefaults.model, data)?.model ?? ""}
           defaultLabel={providerDefaultLabel(providerDefaults.model, data)}
-          defaultDescription="Following the provider's model default"
           loading={checking}
           error={error}
           retry={retry}
@@ -1270,9 +1418,23 @@ export function createTabs(
       defaults: providerDefaults,
       check,
       bound,
+      local,
     } = useProvider(agent);
     useEffect(() => {
-      setDraft(readConfig(agent.config));
+      if (local && agent.key) void provider.check();
+    }, [local, agent.key]);
+    const voiceSave = useRef<Config | undefined>(undefined);
+    const configRevision = useRef(0);
+    useEffect(() => {
+      const next = readConfig(agent.config);
+      configRevision.current++;
+      if (
+        voiceSave.current &&
+        JSON.stringify(next) === JSON.stringify(voiceSave.current)
+      ) {
+        setDraft((current) => voiceConfig(current, next.voice));
+        voiceSave.current = undefined;
+      } else setDraft(next);
     }, [agent.config]);
     // Inert in a build that recommends nothing for Codex.
     const following = onRecommended(draft) && candidatesFor("codex").length > 0;
@@ -1331,17 +1493,19 @@ export function createTabs(
           allowCustomModel={!!bound}
           models={choices(data)}
           value={draft.model}
-          defaultModel={catalogModel(providerDefaults.model, data)?.model ?? ""}
+          defaultModel={
+            bound
+              ? undefined
+              : catalogModel(providerDefaults.model, data)?.model
+          }
           defaultLabel={
             bound
               ? "Codex default"
               : providerDefaultLabel(providerDefaults.model, data)
           }
-          defaultDescription={
-            bound
-              ? "Use the model default on the target computer"
-              : "Following the provider's model default"
-          }
+          {...(bound && {
+            defaultDescription: "Follows the target computer's settings",
+          })}
           loading={checking}
           disabled={saving}
           // A manual choice, even of the default, is never Recommended.
@@ -1459,6 +1623,65 @@ export function createTabs(
                 })
               }
             />
+            <VoicePreview
+              key={agent.key}
+              host={provider.previewHost}
+              previews={data?.previews}
+              accents={data?.accents}
+              voice={draft.voice ?? ""}
+              voices={
+                provider.snapshot().previewChecking
+                  ? undefined
+                  : data?.voices?.filter((voice) => !!data.previews?.[voice])
+              }
+              defaultVoice={data?.defaultVoice}
+              disabled={
+                saving || checking || !!provider.snapshot().voiceChecking
+              }
+              previewDisabled={!!bound}
+              previewLoading={provider.snapshot().previewChecking ?? false}
+              onCommit={async (voice) => {
+                if (settingsHost?.pendingSave) {
+                  setDraft(readConfig({ ...draft, voice }));
+                  return;
+                }
+                if (voice === (saved.voice ?? "")) return;
+                const next = voiceConfig(saved, voice);
+                voiceSave.current = next;
+                const revision = configRevision.current;
+                setError("");
+                setSaving(true);
+                try {
+                  await (agent.configBase
+                    ? save(next, { base: agent.configBase })
+                    : save(next));
+                  if (configRevision.current === revision)
+                    setDraft((current) => voiceConfig(current, voice));
+                } catch (reason) {
+                  // An unconfirmed write can still arrive through sync.
+                  setError(message(reason));
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              onShown={() => {
+                if (local) provider.check();
+              }}
+            />
+            {data &&
+              !data.voices &&
+              !checking &&
+              !provider.snapshot().voiceChecking && (
+                <div className="grid justify-items-start gap-2">
+                  <p role="status" className="m-0 text-body-sm text-subtle">
+                    Voice choices could not be checked. Try again, update Codex,
+                    or choose Codex default.
+                  </p>
+                  <Button variant="ghost" onClick={check}>
+                    Check voices again
+                  </Button>
+                </div>
+              )}
             {!bound && (
               <SwitchPreferenceRow
                 label="Codex apps and plugins"

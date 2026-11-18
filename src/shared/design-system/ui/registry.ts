@@ -255,12 +255,13 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     slug: "radio-group",
     name: "RadioGroup",
     purpose:
-      "Choose one option, including labelled settings cards and text-only tiles.",
+      "Choose one option, including labelled settings cards, text-only tiles, and compact checkmarked rows.",
     behavior: "Base UI owns form and keyboard semantics.",
     variants: [
       "default",
       "card",
       "tile",
+      "row",
       "size: sm | md",
       "disabled",
       "invalid",
@@ -390,6 +391,21 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
     composes: ["field", "radio-group"],
   },
   {
+    slug: "badge",
+    name: "Badge",
+    purpose:
+      "Present concise, non-interactive metadata such as a search result’s Best match label.",
+    behavior:
+      "XS text capsule with neutral and success tones. Not focusable or interactive.",
+    variants: ["xs neutral", "xs success"],
+    status: "proposed",
+    collection: "components",
+    owner: "Global search",
+    source: "shared/design-system/ui/Badge.tsx",
+    baseUi: [],
+    composes: [],
+  },
+  {
     slug: "count-badge",
     name: "CountBadge",
     purpose:
@@ -498,6 +514,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
       "ghost",
       "destructive",
       "outline",
+      "outline-subtle: standard border for quiet secondary actions",
       "attention (proposed): light dashed danger outline with slow marching ants",
       "glass",
       "glass-ghost (proposed): quiet artwork control with glass hover/open states",
@@ -568,6 +585,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
       "bare (no background in any state; glyph-state toggles use 20px artwork at sm; row-revealed actions retain standard artwork sizing)",
       "shape: inset (container radius minus inset via --control-inset-radius) | control (default, 10px) | round (avatar default) | row-end | squircle (prominent avatar edit action)",
       "size: xs (20px, 12px icon) | sm (default, 32px, 16px icon) | md (40px) | lg (52px)",
+      "emoji: a glyph in place of the icon, at --size-emoji-inline",
       "legacy aliases: quiet, solid, compact, toolbar, default, large",
     ],
     status: "proposed",

@@ -57,7 +57,7 @@ export function apply(ctx) {
 | Inject | Registers | Call and required fields |
 | --- | --- | --- |
 | `pages` | A page | `ctx.pages.register({ id, title, component, primary?, placement?, icon?, badge?, sidebar?, companion?, layout? })`. `id` must match the id pattern, `title` non-empty, `component` a function. `placement`: `"sidebar"` (default) or `"dock"` (only for `primary` pages; `"topbar"` and `"toolbar"` are accepted aliases for `"dock"`). `icon`: `data:image/...` URL. `badge`: component shown beside the nav entry. `sidebar`: component receiving `{ target, children }` that replaces the conversation sidebar (wrap content in `className="shell-sidebar-default"`). `layout`: `"document"` or `"workspace"`. |
-| `panels` | A panel for a link/target string | `ctx.panels.register({ id, title, matches(target) => boolean, component, order?, launcher?, channelLauncher?, channelPlacement?, keepOpen? })`. `component` receives `{ target, close, context?, channelContext? }`. Inside `component`, call `ctx.panels.useTabTitle(label)` (a React hook; no-op outside a panel tab; check `typeof ctx.panels.useTabTitle === "function"` on older hosts) to name the tab per target; `title` stays the fallback. `launcher: { icon: string, target: string }` adds a top-bar button (use `matches: () => false` for launcher-only). `channelLauncher` is a component for the channel header (`channelPlacement`: `"bottom"` default, `"side"`, `"tab"`). |
+| `panels` | A panel for a link/target string | `ctx.panels.register({ id, title, matches(target) => boolean, component, order?, launcher?, channelLauncher?, channelPlacement?, keepOpen? })`. `component` receives `{ target, close, context?, channelContext? }`. Inside `component`, call `ctx.panels.useTabTitle(label, icon?)` (a React hook; no-op outside a panel tab; check `typeof ctx.panels.useTabTitle === "function"` on older hosts) to name the tab per target; `title` stays the fallback. `launcher: { icon: string, target: string }` adds a top-bar button (use `matches: () => false` for launcher-only). `channelLauncher` is a component for the channel header (`channelPlacement`: `"bottom"` default, `"side"`, `"tab"`). |
 | `accountActions` | Account menu action | `ctx.accountActions.register({ id, title, icon?, component, placement? })`. The component receives `{ open, onOpenChange }`. Omit `placement` for the plugin section after Settings; use `"before-settings"` for a profile-related action directly above Settings. The host owns menu order, focus, and dismissal. |
 | `settingsCards` | A Settings destination | `ctx.settingsCards.register({ id, title, component, group?, personal?, identityRow? })`. `component` receives `{ active(), community?, navigation? }`; `navigation.target.route` can carry bounded, versioned presentation data for the card. Opening a route must never submit an operation. Optional `identityRow` receives `{ active() }` and contributes a compact account-status link inside Identity. Reuse the plugin’s existing session; check `active()` before navigation or an action. The row retires with its owning registration. Omit `icon` (it is a host icon component). The host supplies navigation and the content column, not a heading. |
 | `sidebarSections` (optional) | A section in the Team sidebar | `ctx.reflect.get("sidebarSections")?.register({ version: 1, id, title, icon, rows: { snapshot, subscribe }, select, actions? })`. `snapshot()` returns a stable array of `{ id, label, icon?, badge?, count?, status? }` until data changes, then notify subscribers. `select(row)` returns an open target such as `{ version: 1, kind: "home" }`. Actions: `{ id, label, icon: ReactElement, onSelect }`. |
@@ -120,6 +120,82 @@ ctx.effect(() => {
 
 The table above covers the services most plugins use. The full contract for every service, with TypeScript types and examples, is in [Plugin architecture](https://github.com/block/buzz-app/blob/main/docs/plugin-architecture.md); the types are exported from [`src/plugins/author.ts`](https://github.com/block/buzz-app/blob/main/src/plugins/author.ts). Read it before you use a service that is not in this table. It describes the latest Buzz, which can have services this app does not. If a service in `inject` is missing, `apply` never runs, so check `plugin_status` after you install.
 
+## Reusing the member picker
+
+Installed plugins can render `ctx.conversation.ui.MembersDialog` and
+`ctx.conversation.ui.GeneralAccess` through the host React instance. Inject
+`react`, `conversation` and `relay`; runtime imports from app source are not
+supported. The type-only author package exports `ChannelMembersDialogProps`,
+`ChannelGeneralAccessProps`, `GeneralAccessPolicy` and `MemberChange`.
+
+```js
+// Inside a plugin component, using a session from ctx.relay.snapshot():
+const h = ctx.react.createElement;
+return h(ctx.conversation.ui.MembersDialog, {
+  key: session.scope + ":" + channelId,
+  session, channelId, trigger, close,
+  title: "Share access",
+  nonMemberLabel: "Not in this record",
+  shareLink: "buzz://plugin?id=example.records&record=design",
+  memberActions: {
+    canAdd: canManageRecord,
+    pending: recordAccessPending,
+    // Own stricter policy, write confirmation and readback here.
+    change: (change, signal) => updateRecordMember(change, signal),
+  },
+  accessSettings: h(ctx.conversation.ui.GeneralAccess, {
+    capability: recordAccess,
+    recovery: session.recovery,
+    channelId,
+    policy: {
+      subject: "record",
+      allowPublic: false,
+      visibilityDescription: (visibility) => visibility === "public"
+        ? "Everyone in this community can read this record and its revisions."
+        : "Only record members can read this record.",
+    },
+  }),
+});
+```
+
+The plugin owns opening/closing and the trigger ref for focus return; render the
+picker only while open. Keep it keyed to session/channel. Addressable openings
+must follow the [navigation contract](navigation-history.md); the component does
+not register a destination. Keep external operations in their existing owner if
+navigation can hide the dialog. The public picker props cover session/channel,
+trigger/close, title/description, non-member label, member actions, access settings
+and share link; host navigation and visit-lifetime props remain internal.
+
+`memberActions` routes individual additions, role changes and removals through
+the plugin, retaining host role checks; team additions and host-owned addition
+recovery are hidden. Retained host recovery state stays with its session owner. Its `canAdd`
+can restrict additions and `pending` blocks member mutations and local dismissal.
+The picker also locks while its callback is unresolved, shows callback errors,
+and passes an AbortSignal retired on unmount or session/channel change. The
+callback must confirm writes and refresh signed member roles before resolving;
+uncertain writes need recovery in the plugin's access settings, without resending
+blindly. These UI policies do not replace relay authorization.
+
+`nonMemberLabel` sets both the visible heading and accessible name of search
+results that are not members. With `memberActions`, the default is "Not yet
+added"; built-in channel/chat wording is unchanged. A blank label uses that
+default too.
+
+`accessSettings` replaces built-in General access (`null` hides it). The optional
+GeneralAccess policy supplies a generic subject and visibility-change disclosure;
+`allowPublic: false` removes Public participation while keeping Private and View
+only. Existing Public access is displayed as Public; reducing it confirms that
+the picker cannot restore it. Its capability retains signed fresh-read, save and
+uncertain-write recovery behavior. Switching to Private also warns that people
+who already joined keep access until removed, without naming a host screen. Pass
+`mayHaveGuestMembers: false` only when signed roles verify there are no Guests;
+this suppresses the View only reader warning, never the Public member warning.
+Copy link uses `shareLink` and grants no access. With `memberActions`, it is hidden
+unless the plugin supplies a nonempty `shareLink`; it never falls back to the backing
+channel. Without plugin-managed actions, the channel/chat link remains the default.
+Other omitted overrides preserve chat/channel behavior. Hosts predating this extension lack the two UI entries; check their
+presence before offering sharing when supporting those hosts.
+
 ## Host access (`manifest.host`)
 
 Everything beyond the services above must be declared in `manifest.json`; the owner reviews it at install. Undeclared commands, origins, processes and file access are refused by the host. Limits: at most 16 each of `commands`, `processes`, `networkOrigins`, `agentHooks`. Program names are bare names (`[A-Za-z0-9._-]`, at most 80 bytes, no paths), at most 16 args of 1024 bytes each.
@@ -172,6 +248,70 @@ Add `"host"` to `inject`, then:
 - A specializing reader opts in with `component.profileHistory = true`; canonical profile targets then inherit profile Back/Forward and explicit Close behavior in conversation tabs. Match the existing profile address rather than inventing a separate history store; unmarked catch-all panels and contextual channel panels retain their own behavior.
 - The host already supplies the shell, navigation, active state, error boundaries and (for panels and Settings) the outer surface, header or content column. Do not add your own page frame, header-level navigation, overlays, global stylesheet, theme or reset. Page content owns its interior padding and scrolling. Panels sit inside a host card: render only the body.
 - Avoid fixed widths; the page may be narrow. Use `width: "100%"`, flex and wrapping. Colors: use host tokens (`var(--...)`) rather than hard-coded values so light and dark themes both work.
+
+### Host Markdown and panel workspaces
+
+Inject `conversation` to render `ctx.conversation.ui.Markdown` with
+`{ content, session?, openLink?, scale? }`. The shared host styles own headings,
+spacing, code frames and tables. `scale` defaults to `"message"`; choose
+`"document"` for a page or editor read view. This is the host document renderer: GFM,
+Buzz-rich links, credential-free HTTP(S) links, no executable HTML, and images
+shown as alt text. Oversized or deeply nested input falls back to literal text
+using the same bounds as Shared notes. `session` supplies community-aware link
+names and the receiving community/viewer for default Buzz link navigation. The
+host resolves supported Buzz forms and opens them through its navigation service.
+An optional `openLink(url)` override must synchronously return true if your page
+handled the destination locally; false falls through to host navigation. Without
+a usable session/navigation service, Buzz links keep the host's unavailable-link
+behavior. Existing URL safety and external browser handling remain host-owned.
+
+Inject `panels` to use these host members:
+
+- `ctx.panels.ui.Workspace({ items, value, select, label?, actions?, focusOnMount? })`
+  is the existing tab workspace. Each item has `{ id, label, content, icon?, close?, toolbar? }`; content remains
+  mounted while another tab is selected. `close` may return false to retain a
+  tab, for example while edits need confirmation. The host owns tab controls,
+  focus and nested detail presentation; your page owns selection, admission,
+  closing and Back/Forward visits. It does not create a second history owner.
+- `ctx.panels.useTabTitle(label, icon?)` publishes a document's live title
+  inside a host workspace (including registered panels opened by Channels).
+  Feature-detect this hook on older hosts before calling it.
+- `ctx.panels.ui.useSplit(scope, name, defaultWidth?, min?, primary?)` returns
+  `{ ref, style, handle }`. Attach `ref` and `style` to your layout container,
+  place `handle` beside its secondary pane, and use CSS variable
+  `--secondary-panel-width` for that pane's width. Your page owns responsive
+  layout and scrolling. Use the current session's `scope` and a stable name
+  prefixed with your plugin ID. Plugin widths have a separate host namespace;
+  plugin-ID prefixes keep different plugins from sharing a name. Width is saved per scope/name and follows saves
+  from other windows; undefined scope keeps it in memory. Double-click resets
+  the preferred width. `primary`, when supplied, is `{ defaultWidth, maxRatio }`.
+
+```js
+export const inject = ["react", "conversation", "panels", "pages"];
+export function apply(ctx) {
+  const React = ctx.react;
+  function Reader() {
+    ctx.panels.useTabTitle?.("Guide");
+    return React.createElement(ctx.conversation.ui.Markdown, {
+      content: "## A guide\n\n**Shared rendering**",
+      openLink: () => false,
+    });
+  }
+  ctx.pages.register({
+    id: "reader", title: "Guide", primary: true, layout: "workspace",
+    component: () => React.createElement(ctx.panels.ui.Workspace, {
+      items: [{ id: "guide", label: "Guide", content: React.createElement(Reader) }],
+      value: "guide", select: () => {},
+    }),
+  });
+}
+```
+
+These are runtime values on injected services, never imports from app source.
+`@buzz/author` exports only types, including `MarkdownProps`,
+`PanelWorkspaceItem`, `PanelWorkspaceProps` and `PanelSplit`. Hosts predating
+these members cannot run plugins that require them; check for availability and
+show an upgrade explanation if supporting older hosts.
 
 ## Common mistakes
 

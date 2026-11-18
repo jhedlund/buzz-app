@@ -154,6 +154,38 @@ without them), whether they sync and the current instructions revision. A
 hosted agent or one on another device gives its synced instructions when the
 owner can read them here (read only, never creating or moving its config),
 and otherwise `unavailable` saying why.
+
+Each named or listed agent also has `modelSettings`. Codex, Claude Code, goose
+and Pi expose `model` and `effort`; goose and Pi also expose `provider`.
+Each field has a `source`: `configured` includes the saved string `value`,
+`default` inherits the type's defaults, and `recommended` follows
+Buzz's Recommended policy. These saved fields stay unchanged when defaults change.
+Codex and Claude Code also include `resolved` on each field. A known selection
+has `{ value, source }`, where the source is `configured`, `device`, `provider`
+or `recommended`. Codex uses the same device preferences, loaded model catalog
+and supported thinking fallback as execution. Claude resolves device preferences
+and cached Recommended choices; an unset native choice stays unknown because
+Claude Code settings can depend on the workspace. Model aliases remain aliases.
+An unresolved selection has `{ unavailable }`: `not-loaded` for a catalog or
+recommendation not yet loaded, `unknown` for a default the host cannot establish,
+`remote` for an execution target's settings, `unsupported` when execution would
+refuse a synced thinking choice, or `execution-unavailable` when its saved
+placement cannot be read. Reads never start discovery, inspect harness
+files or start a process. Other types can omit `resolved`.
+These are current selections, not proof of an active turn's model or effort.
+Per-conversation choices and existing sessions can differ.
+An invalid field has `source: "unavailable"`. A type without this read contract,
+an unreadable synced config, or an agent hosted elsewhere has
+`modelSettings: { unavailable: "…" }`, even when its instructions are readable.
+The type owns the projection through `AgentType.readModelSettings`; the service
+does not expose its config or infer settings from the type's name or summary.
+Plugins can feature-detect `ctx.agents.readModelSettings(agentKey)` to read the
+same safe metadata for a local membership, including one that runs on an execution
+target. It returns `modelSettings` directly, or `{ unavailable: "…" }` when the
+membership or settings are unavailable here. It does not read another device's
+defaults or alter agent settings. Named reads, lists and plugin reads share the
+same projection. See [the plugin contract](plugin-architecture.md#agent-model-selections).
+
 `team_read` returns the teams Your teams shows in that community, by id or
 exact name, or all of them: name, instructions, members, whether the team syncs
 and its revision. `team_update` submits an unsaved draft of a team's new name
@@ -610,12 +642,63 @@ Then the wake's run
 goes on, and only what it sends is posted. Pi still waits for the wake, so a
 run of its own that fails fails what is queued behind it too, which reports it.
 
+Plugins can pass guard options to `ctx.agents.wake` when the host advertises
+support. Check the flag strictly before calling; older JavaScript hosts can
+ignore extra arguments and enqueue an unguarded wake. Never send a wake as a
+capability probe.
+
+```ts
+if (ctx.agents.supportsGuardedWake === true) {
+  const result = await ctx.agents.wake(agentKey, wake, {
+    signal: controller.signal,
+    current: () => workIsStillCurrent(),
+  });
+  if (result.status === "dropped") {
+    // No input was handed to the prompt/steer transport.
+  }
+}
+```
+
+It uses the same queue, destination and plugin-data framing as `wake`.
+The synchronous `current` predicate must return `true`. The host checks it at
+admission, after queue waits, and immediately before prompt or steering handoff.
+A thrown predicate fails closed. The host also checks plugin lifetime, agent
+identity, community session, destination membership and the owner's read access.
+A predicate cannot grant access or override Stop.
+
+The result is `{ status: "delivered" }` at the final guarded handoff to the
+runner's prompt/steer transport. This is neither an early queue acknowledgement
+nor proof of model consumption, task completion, or a durable receipt. Once input
+has been handed off, cancellation cannot retract it. A dropped result has
+`status: "dropped"` and a `reason`: `aborted` for caller cancellation, `stale` for
+a false predicate, `guard-error` for a thrown predicate, `unavailable` for a lost
+host binding or authority, or `refused` for a full queue or a harness that ends
+without handoff or does not support guarded wakes. Invalid wake or guard
+arguments throw synchronously.
+Two-argument calls still return `void` and throw on an unavailable agent or
+full queue. Plugins must
+choose their own fallback when the support flag is absent.
+The guard and result are local and are not saved across shutdown. Dropped guarded
+wakes have no retry action that could bypass the original guard.
+
+Harness authors opt in with `AgentType.supportsGuardedWake: true` only when every
+prompt/steer path checks `Delivery.current()` and `signal` after waits, immediately
+before handoff, and calls `Delivery.accepted()` at that handoff. Without this
+explicit support, a guarded wake returns `dropped/refused` before queue admission
+and never invokes `run`. Ordinary wakes still work. The bundled Claude Code,
+Codex, goose and Pi harnesses support this contract.
+
 An agent hands off to itself in another of its conversations with the
 `self_handoff` tool, which takes a channel, a thread and text. The tool requires
 a channel the agent can see, as `send` does, and a thread in that channel (any
 message of it names its root) unless the channel is a Solo chat. It refuses the
 current conversation, which is the whole channel in a DM, a Solo chat or a
-channel-scoped session. It is the same `plugin` trigger with `from`, the
+channel-scoped session. A channel-level watch or timer turn of an agent whose
+type runs one session per thread (its `sessionControls.scope`) is apart from
+that channel's threads outside a DM, Solo chat or huddle room, so it can hand off into one of
+them. Agents decides this for every harness through the run's handle
+(`threadsApart`); a type with no session controls keeps the channel one
+conversation. It is the same `plugin` trigger with `from`, the
 conversation it came from, in place of `plugin`, shown in a `<self-handoff>`
 section that names that conversation, says nobody wrote it as a message and that
 its text is data, and that the agent acts only on what its owner asked. Only a
@@ -1602,6 +1685,26 @@ cannot replace a received terminal result. Recovery neither archives raw activit
 nor restores history after reload. Older servers without the endpoint leave
 tasks unknown.
 
+A remote agent's Activity tab also lists the sessions Builderlab stored, above
+the live feed. Each time the tab opens it reads
+`/v3/beekeeper/list-agent-sessions` (pages of 50, most recently active first),
+following `next_cursor` past short or empty pages until it has 30, no cursor
+remains, or five pages were read. It shows up to 30, saying when older ones
+aren't shown. The conversation it was
+opened from comes first: its thread's session, else its channel's, which a DM
+or channel-scoped agent shares. When that session is not on the page, the tab
+asks for it by `channel_id` and `thread_root_event_id`. A session's messages
+are read from `/v3/beekeeper/get-agent-session-messages` only when its
+transcript opens, and again when the live feed shows one of its turns start or
+end. Each read returns the whole session, so a running turn isn't polled; with
+the live feed off or connecting, an open transcript doesn't refresh on its own. Messages carry no turn: a prompt joins the turn its mention
+started, and any other message the latest stored turn started at or before it,
+never one before the last prompt's turn. A message older than every turn joins
+the first. Tool requests join their responses by ID, and a message tool's text
+shows as the agent's posted message. A removed session shows no transcript. A
+server without the session list, a signed-out owner or an account without
+remote agents shows the live feed only, as it shows without Builderlab.
+
 ### Activity updates in the conversation
 
 An agent's work has one working indicator. While a live activity bubble on the
@@ -1912,17 +2015,27 @@ Claude implements it from the transcripts Claude Code keeps for the agent's
 workspace: sessions whose first prompt names the agent, plus those this app saved
 for it (prompts from before agents were named), with their subagents' requests.
 Streamed responses repeat their usage on each line, so each request is counted
-once.
+once. A watch's or timer's standalone turn opens with no context, so only the
+app's record of the session it started says it is the agent's. That record is
+kept apart from saved prompts, for 32 days from the session's start, longer than
+Usage reads back, with no limit on how many sessions it holds. Each day's starts
+are saved as one value, and a day's value is removed once all of it is past
+keeping. The snapshot has no `channelId`, and a session from before that
+record was kept is not counted.
 
 Codex finds the agent's threads through app-server by the agent's name in their
 thread names, keeps those whose rollout's developer instructions name the agent's
 pubkey, and reads each rollout's per-response `token_usage_record` entries, adding
-the subagent threads each one spawned. Codex records no cost.
+the subagent threads each one spawned. Codex records no cost. A standalone turn
+runs on an ephemeral thread, which Codex keeps no rollout for, so Usage does not
+count it.
 
 Goose lists the agent's sessions in its workspace through `goose-acp`, as its
 Activity tab does, and reads the usage goose saves on each reply, with goose's
 own cost estimate where it has one. Both count a request's cached tokens in its
-input, which the readers subtract.
+input, which the readers subtract. Goose and Pi also count a standalone turn's
+session, which has no `channelId`; Pi finds it by the same kept record and
+counts it by when it last answered.
 
 All three read only the harness's own session history; none reads Buzz's saved
 agent activity or turn metrics.

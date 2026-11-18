@@ -104,8 +104,9 @@ have separate boundaries. A page sidebar is isolated by the same owned-contribut
 boundary, so a failure falls back to a concise alert without taking down the page,
 Settings, or shell. The host owns the slot, collapse state, labels, and narrow drawer;
 the page owns its sidebar content and local interaction state. Sidebar presentation
-helpers remain importable from `bundled/channels`; the conversation sidebar also
-exposes a versioned section contribution for plugins.
+helpers live in `features/channel-navigation`; the global host selects a bundled
+preview context, and adapts `Page.sidebar` through the same section engine. Messages
+contributes its conversation sidebar rather than being part of the host.
 
 Channels is the page-authoring example, not a thin registration wrapper over a
 host-owned product page. Keep page-specific components, styles, interactions and tests
@@ -322,6 +323,22 @@ rendering and Custom emoji Settings stay available; catalog, event tags and deli
 session-owned. The standard composer remains shared host UI, independent of any
 example plugin. Automated tests use source-only external consumer and tool fixtures
 to exercise component reuse and contribution lifecycle.
+
+### Agent model selections
+
+A plugin that injects `agents` can feature-detect
+`ctx.agents.readModelSettings?.(agentKey)`. This async read returns the same
+safe `modelSettings` projection as `agent_read`, without instructions or raw
+configuration. It accepts a local membership key from the agent service.
+Missing, unreadable or unsupported settings return `{ unavailable: "…" }`.
+Each supported field retains its saved policy and can include a resolved
+selection with provenance. A remote execution target never inherits this
+device's defaults. See [model read semantics](agents.md#creating-and-changing-agents-from-a-conversation)
+for field shapes and unresolved states. The read uses existing resolver state;
+it never starts model discovery, launches a harness or changes an agent.
+The result describes a current selection, not an existing session's override.
+Older hosts lack the method. A missing method or unresolved value does not
+establish a model; consumers must preserve that distinction.
 
 ## Plugin module contract
 
@@ -773,22 +790,67 @@ ctx.reflect.get("sidebarSections")?.register({
 });
 ```
 
+#### Bundled section components (internal preview)
+
+The service also has bundled-only previews, `registerContext` and version-2
+`registerSource`. A context declares its id, target matcher, optional navigation
+page owner and component. The host resolves the applicable context and supplies
+its frame and section renderer; replacing a context unmounts its sources. A
+source must name its context's full `<pluginId>/<contextId>` key. The source
+props are neutral: target, live ownership check and publication callback;
+Messages-specific state stays in the Messages contribution. Peer visibility,
+source customization and opening these previews to ordinary plugins are deferred.
+
+The preview is likely to change and is type-visible through the author API's exported
+`SidebarSections` type. Registration is supported only for bundled owners;
+the runtime rejects non-bundled owners. Version-1 registration and snapshots
+remain unchanged; plugin-development introspection currently lists only
+version-1 sections.
+
+A source runs once and supplies live `{ id, defaultPosition, element, title? }`
+sections through its `render` callback. Use stable component types and opaque,
+stable section ids. The shell names each slot `<pluginId>/<sectionId>`, orders
+slots by rank and then ordinal key, and drops invalid or duplicate descriptors.
+Slot ids do not replace saved collapse, sort, filter or drag keys. Team ranks
+follow the existing saved group order, with version-1 contributions trailing in
+their existing saved order; there is no new order record or migration.
+
+Sources run beside the shell and portal their content into keyed containers.
+Only structure and committed keys cross the shell's store; current content stays
+in the source's React render. Team sources mount inside the shared Team drag
+context. Solo sources stay outside it and retain their existing nested drag
+context. Keep any context or synthetic-event owner needed by portaled content
+above its source, since React events follow the source ancestry.
+
+Each slot has its own error boundary and Retry. A source failure replaces its
+slots with one unavailable-and-Retry placeholder; a source returning no
+publication settles empty. Registrations and publications are fenced by owner
+incarnation, so disabling or replacing a source retires its old content.
+The Messages context mounts one inventory for workspace preferences, rows and
+actions. The built-in source publishes the workspace and home sections. Solo
+region sources publish their own region content. A primary region can compose
+ordinary chats in its task view. Starred and mixed workspaces keep their unified
+placement. Both bundled sources activate with the required Channels plugin.
+
+The viewport waits for every current section key to commit before consuming a
+saved scroll position. Container refs and portal publication settle during layout,
+before paint. Browser tests must still verify scrolling, group spacing, focus and
+drag hit testing: a DOM emulator cannot establish their geometry.
+
 ### Solo-only sidebar
 
-`sidebarScope.restrict({ id, scope: "solo", banner })` shows only the Solo
-inventory while it is registered. The All/Solo/Team tabs and page destinations
-give way to the plugin's `banner` component, and the person's saved tab returns
-when the last restriction is removed. It returns a remover; disable, replacement
-and teardown remove it too, so a restriction can never outlive its plugin. A
-banner that throws renders nothing and leaves the sidebar usable. It changes
-only the sidebar: links, search and alert clicks still open any conversation.
-Focus is the first caller and registers its restriction only while Focus is on.
+`sidebarScope.restrict({ id, scope: "solo", banner })` filters the sidebar to
+Solo-labelled chats across sections. Empty sections, Team contributions and
+pinned page destinations are hidden. The banner is isolated from the sidebar by
+an error boundary. Links, search and alert clicks can still open conversations.
+The call returns a remover. Disable, replacement and teardown remove the
+restriction. Focus registers it while active.
 
 ### Decorating host sidebar rows and adding sort modes
 
 `ctx.reflect.get("sidebarRows")` is an optional version-1 capability for host
 Team channel, direct-message and ordinary Solo rows, including rows moved into
-custom Team groups or Solo workspaces. Plugin-owned Solo regions render their
+personal workspaces. Plugin-owned Solo regions render their
 own rows and are not decorated here. Use the reflective lookup rather than
 required `inject` so the plugin still activates on older hosts.
 
@@ -1364,7 +1426,7 @@ contracts with their own layout and local navigation.
 
 ### Bundled defaults
 
-**Channels is the only required bundled plugin.** Todos, Usage, Reminders,
+**Channels is the only required bundled plugin.** Usage, Reminders,
 Workflows, Changesets, Shared compute, Charts and File viewer are off by default for fresh installs. Bestie,
 Feedback, Diff viewer, Identity Naming, Agent Activity, Terminal, Links, GitHub, Inbox,
 Named threads, Repositories, Agents, Claude, Codex, Builderlab,
@@ -1430,8 +1492,8 @@ Re-enabling never reopens a
 stale tab. Eligibility and `channelContext` are presentation, **not authority**:
 the panel must independently verify access before reading any sensitive data and
 fence asynchronous reads on revocation. Channels registers **View canvas** this
-way. Canvas has no separate plugin toggle; Solo,
-Todos, and agents use the same session capability. Its editor keeps the channel's
+way. Canvas has no separate plugin toggle; Solo
+and agents use the same session capability. Its editor keeps the channel's
 draft locally, so returning to the channel or reopening Canvas restores it. Members of archived
 channels can read Canvas and History, but cannot edit, save, or restore through the panel.
 A retained unpublished draft is labeled as local; History shows the saved versions.
@@ -1478,8 +1540,9 @@ without it, Create remains available and the server enforces its owner limit.
 estimated from visible rows. One origin-wide pending slot is
 re-read and verified before dispatch; browser local storage has no atomic compare-and-set,
 so exactly simultaneous contexts remain a documented client-side race;
-it never signs deletion or infers acceptance from a missing list row. Joining
-stays in the existing Join a community dialog; the card only copies the new relay address. Its
+it never signs deletion or infers acceptance from a missing list row. After
+creation the card opens the Join a community dialog on the new address through
+`communityJoin`, or copies the address when no identity is ready to join with. Its
 account backend follows the same split as `HostService`: live development with a
 pinned viewer uses the broker's `/api/builderlab/*` routes (`browser-host/builderlab.mjs`),
 which keep their own session credential and signing key in Node. Desktop builds use
@@ -1531,7 +1594,13 @@ the open pane, not merely selected: while the pane is hidden the panel stays sel
 reads unpressed, and `toggle` shows it again. With `channelPlacement: "tab"` the launcher instead
 opens one tab per channel in the side pane, grouped with thread and other panel tabs;
 a new target replaces that tab, and a link tab already open for the target becomes it.
-The tab receives `PanelProps.context` too, so it can open or push further tabs. A launcher
+The tab receives `PanelProps.context` too, so it can open or push further tabs.
+Channel tabs also supply optional `context.openMedia(messageId, attachment)` for
+images and videos. This uses the channel's media review viewer, with the same
+session-backed source, zoom, gallery and comments. It returns false after the
+opening is hidden or retired, or for unsupported attachment kinds; file panels
+continue to use target opening. A decorative `tabIcon: ComponentType` overrides
+the default information icon for a channel tab. Older hosts may omit both features. A launcher
 selects its **exact active contribution**, not target matching. `available()` and
 `toggle()` are revoked when the mounted context or contribution is retired. Optional
 `PanelProps.channelContext` carries the current displayed public context to a channel
@@ -1549,11 +1618,11 @@ are also deferred; opt in when the contribution's static title is sufficient unt
 selection.
 
 A plugin panel, which cannot import host modules, names its tab with
-`ctx.panels.useTabTitle(label)`, a React hook called in the panel component (for
+`ctx.panels.useTabTitle(label, icon?)`, a React hook called in the panel component (for
 example `ctx.panels.useTabTitle("#12554892")` for a build opened from a link). The
 label replaces the static `title` while the component is mounted and the static
-`title` returns when it unmounts; outside a panel tab the call does nothing. It
-takes a label only, no icon. Hosts that predate it lack the hook, so plugins that
+`title` returns when it unmounts; outside a panel tab the call does nothing. The
+optional `icon` is a React node. Hosts that predate it lack the hook, so plugins that
 support them test `typeof ctx.panels.useTabTitle === "function"` first.
 
 Channels keeps layout and channel/thread selection. The Terminal plugin binds its
@@ -1564,60 +1633,13 @@ drawer, and re-enabling starts closed. See [Terminal](terminal.md) for native su
 session behavior and validation limits. This is a host-matched preview addition,
 not cross-version capability negotiation.
 
-### Optional Canvas todos
+### Canvas saves
 
-Todos (`buzz.todos`) is bundled **off by default** in browser and desktop. Enable
-it under Settings → Plugins → Manage plugins. Its channel-header ListChecks button opens a right-hand
-side panel, grouping items as To do, In progress and Done, with add, a per-item status
-selector, check/uncheck, one optional assignee per item, automatic
-saving after each action, and explicit Refresh. It uses shared controls and theme
-tokens; Channels still owns panel geometry, responsive placement and selection. Terminal remains in the bottom drawer.
-
-The source of truth is ordinary Markdown in one root level-two `Todos` section:
-
-```markdown
-## Todos
-
-- [ ] Review the plan
-- [/] Build the preview
-- [x] Share the preview
-```
-
-`[/]` marks Doing, the common Markdown convention for an in-progress task;
-ordinary Markdown renders it as plain text. Canvases without it keep their
-existing meaning: `[ ]` is To do and `[x]`/`[X]` is Done.
-
-Unordered checkbox items in that section are shown, including nested tasks. Nested tasks remain under their root task’s status group, with collapsible subtrees.
-Quotes and fenced examples are not tasks in this view. Doing and checkbox edits
-change one source byte; additions insert below the heading without rewriting other
-content.
-People who can’t write the channel’s Canvas, such as guests, see Todos read-only.
-Duplicate Todos sections block editing until corrected in Canvas. Disabling removes
-the convenience UI, not the saved list: Channel actions → View canvas remains editable.
-
-An optional terminal suffix records assignment as ordinary Markdown:
-` · Assignee: [Display name](nostr:npub…)`, using a full valid npub, not the abbreviated
-placeholder shown here. Only that exact structural suffix is assignment metadata;
-other links/prose remain task text. The public key is identity; names are escaped
-presentation. Assign/change/clear edits only the suffix. The selector uses the
-current channel member roster, including that boundary for shared naming policy,
-with public-key qualifiers in the opened choices. Missing rosters disable assignment controls; failed profile reads retain key/name fallbacks
-and offer retry. Profile renames never rewrite saved Canvas. Former members remain
-visible and can be changed or cleared. Assignment sends no notification and grants
-no channel membership or access.
-
-Canvas reads occur on open and explicit Refresh, not on a timer. Missing assignee
-and member profiles use the existing shared background directory. Typing an unfinished
-new item stays local; Add, checkbox and assignment actions save automatically.
-Task actions pause while saving; the new-item input stays editable and retains
-its text when the save finishes. If the loaded Canvas was written in the current second,
-a single cancellable wait respects its timestamp ordering; there is no background
-retry loop. Failures and recovered drafts expose Retry rather than silently publishing
-on reopen. Save uses the existing session Canvas/outbox contract, including its
+Canvas editor saves use the session Canvas/outbox contract, including its
 256 KiB content limit (the complete signed event must also fit the relay's
 512 KiB frame), fresh membership check, writer-backed Canvas head/editor-confirmation
 reads and exact signed-event recovery. Canvas reads default to strong consistency
-for editor/Todos bases and setup preconditions. Setup delivery and its separate
+for editor bases and setup preconditions. Setup delivery and its separate
 exact-ID confirmation both use writer-backed reads; unknown seed outcomes are
 checked without automatically replaying the seed. Template copies explicitly opt
 out and remain replica-eligible; Channel Settings no longer reads a Canvas preview.
@@ -1627,7 +1649,7 @@ It ignores mismatched events before selecting the current head; an invalid newer
 event cannot hide a valid returned head. History rejects pages containing invalid
 coordinates. These checks precede Solo's separate owner/agent-attestation check,
 so an authentic signature on unrelated content cannot make it Canvas instructions.
-Editor/Todos saves carry `expected-revision=<loaded
+Editor saves carry `expected-revision=<loaded
 head id>` (or `none` when absent); template seeds carry `none`. On relays supporting
 Canvas compare-and-swap, stale preconditions are refused atomically before mutation.
 A proven conflict keeps the local draft and dismisses only that rejected outbox
@@ -1962,7 +1984,14 @@ program but not every argument. It returns `{ write, end, kill, exited }`.
 stdout and stderr arrive as UTF-8 text as they are read, not split into lines.
 `cwd` is absolute or `~/…` and is created if missing. `env` adds to the app's
 environment (`null` removes a variable); variables starting `BUZZ_` or `NOSTR_`
-are never inherited. The program is found on the same search path as commands,
+are never inherited. On macOS, a Buzz opened from Finder or the Dock also gives
+every process the login shell's exports named in
+`BUZZ_LOGIN_SHELL_ADDITIONAL_EXPORTS`, a list separated by commas only, where
+`*` matches anything and a `!` pattern excludes wherever it appears, less any
+`BUZZ_` or `NOSTR_` variable; `env` still wins. On macOS 12.0 to 12.2 only the
+login shell's PATH is read. Host commands and processes get the same forwarded
+variables. The
+program is found on the same search path as commands,
 which on macOS also includes `~/.local/bin`. A process declared with
 `"bundled": true` instead runs the copy the app ships in its `bin` resources and
 never searches PATH; the Goose plugin runs `goose-acp` this way.
@@ -2278,8 +2307,96 @@ refuse. Only the verified fixed ownership file is excluded.
 The shared root permits at most 64 MiB and 16 artifact files. Any plugin can fill
 it; there is no per-plugin quota or fairness promise. A full root refuses before
 another file is created, without evicting unexpired files. Failures remove output
-best-effort; residue remains counted. There is no index, sidecar, recovery adoption,
-content deduplication or temporary-to-final file service.
+best-effort; residue remains counted. There is no persistent index, sidecar,
+recovery adoption, content deduplication or temporary-to-final file service.
+The optional after-send policy below uses only a bounded in-memory consent map.
+
+#### Opt-in temporary attachment release
+
+A compatible desktop frontend/native pair accepts
+`await host.saveBytes(bytes, {sha256, releaseAfterSend: true})`. The flag defaults
+to off; false/omission preserves ordinary saves. Require the returned
+`releaseAfterSend === true` acknowledgement. An older native host may save while
+ignoring the option: missing/false acknowledgement rejects as unsupported and
+**possibly saved**, never permission to retry. Establish a compatible released
+pair before enabling a consumer; method detection alone is not evidence.
+No new grant, caller path/account, deletion callback or release command exists.
+
+Native captures the saving **human Nostr owner**, not a plugin ID or federated
+login account. Opt-in saves may refuse if identity is unavailable, closed or busy
+at the final commit. Consent insertion and identity close share a short native
+fence; ordinary saves remain identity-independent. Native command timeout/drop
+before commit prevents consent. Renderer disposal/page retirement/lost IPC replies
+are not native cancellation signals: they can leave a possibly saved file and
+committed consent even before the renderer learns the result. Never automatically
+save again to recover an unknown outcome.
+
+The app's shared attachment tools collect bounded local hints after read/upload,
+using the bytes' exact SHA256/size and a matching upload descriptor. These hints
+travel outside signed event tags and tool arguments. They do not create deletion
+authority. Only after the **full native evidence-wrapped publication** succeeds
+with the relay accepting that exact signed kind-9 event ID does native attempt
+release. Upload, local event insertion, renderer claims and an unconfirmed receipt
+are insufficient. This is not recipient delivery/read or permanent remote storage.
+The trusted app supplies read/upload mapping; no independent cryptographic native
+provenance or malicious-plugin sandbox is claimed. Standalone/browser clients do
+not gain a local deletion implementation.
+
+A different runtime plugin may send the saving plugin's source for the same human
+owner. Native requires its process-local save consent, exact direct-child path,
+saver digest, private no-link file identity, content hash/size, and the confirmed
+event's URL/hash/size together in one imeta. Saver update/disable and later UI or
+federated-session changes do not retarget previously committed consent. Unknown,
+legacy, replaced, aliased, unmarked or other-owner files never acquire consent
+from filenames or tool hints. Platforms without safely verifiable file identity
+retain the source. Public explicit deletion retains its existing grant/owner rules.
+
+One bounded best-effort attempt per distinct source uses the shared byte permit,
+root writer and reader exclusion, with **one shared 30-second cleanup-entry budget
+for the whole message**, including scheduling and queue wait. The confirmed send
+returns immediately without awaiting cleanup; cleanup runs detached on the app's
+native runtime, not the runner lifetime. Runner disposal does not cancel it.
+The deadline is captured before spawning, and actual blocking work keeps its
+byte/root/reader guards until completion. App shutdown need not drain cleanup:
+undispatched work can be lost and sources retained; dispatched unlink may finish
+with an unknown outcome. No work is durable or required to outlive the app.
+Failure/refusal never changes a confirmed send into an error or repost.
+Active app-wide readers refuse cleanup;
+while cleanup verifies content, new direct/process reads instead promptly refuse
+with `File reads are busy; try again later`, without spawning/reading or silently
+retrying. A stalled hash can outlive the response budget; dispatched work retains
+admission/exclusion through real completion and its unlink outcome can be unknown.
+
+| Outcome | Source and caller behavior |
+| --- | --- |
+| Read/upload/body/mention/emoji failure, or native-unconfirmed publish | Keep sources; no cleanup or automatic resend. Earlier uploads may exist remotely. |
+| Confirmed native publish, cleanup succeeds | Local source removed and quota reclaimed; posted message/media unchanged. |
+| Confirmed publish, busy reader/root/queue, mismatch or cleanup error | Send still succeeds; source may remain indefinitely, without a cleanup retry. |
+| Dispatched cleanup exceeds the shared deadline | Send succeeds; local cleanup outcome unknown and actual work may finish late. |
+| Second sequential send of a released path | Normal missing-file failure before upload; reuse the posted link, not the old source. |
+| Concurrent send with bytes already read | It may finish from its snapshot even after the first confirmed send releases the source. Future reads are not reserved. |
+| Restart/crash/different process | Consent is lost, never adopted from a filename; files may remain indefinitely. |
+
+**Cleanup may never happen automatically; expiry only makes a file eligible for removal during a later save.**
+There is no durable/cross-process consent, background sweep, completion callback
+or eventual-erasure guarantee. Only this new after-send path requires confirmed
+publish; owner deletion, lazy expiry sweeping, erasure and disk loss remain
+independent. Save acknowledgement is not a publication/deletion receipt;
+`sent <id>` confirms publication, not local deletion.
+
+When returning an opted-in path, explain: “Temporary attachment source: send this
+file once. After a confirmed post, the host may release the local copy; keep the
+posted link for reuse. Failed or uncertain sends are not safe to repeat
+automatically.” Also disclose that cleanup refusal may retain it indefinitely.
+
+The bundled Codex and Claude Code runtimes suppress managed-attachment hints
+when their active reader is backed by an execution target. Those attachments
+still publish normally through the same tools, but cannot trigger desktop-local
+managed cleanup through these two guarded readers. No remote deletion is added.
+The shared app client otherwise forwards hints by default; custom-reader harness
+integrations retain their existing trusted-reader contract and must not treat
+this scoped guard as universal source provenance. Managed release remains local,
+bounded by the same consent/identity/path/content checks above.
 
 Optional `host.deleteManagedFile(path)` requires `host.managedFiles` and the current
 enabled plugin revision, not `host.files`. It accepts only a direct, host-generated
@@ -2932,7 +3049,8 @@ PDFs need no network access beyond the file.
 
 The conversation preview exposes top-level `registerTool`, `registerCompletion` and `registerInline`
 methods and stable `conversation.ui.Composer` / `.Message` / `.Thread` / `.Conversation` /
-`.ReplyBranch` / `.ReplySummary` components, plus `.Tabs` while a plugin provides it. Generated
+`.ReplyBranch` / `.ReplySummary` / `.MembersDialog` / `.GeneralAccess` components,
+plus `.Tabs` while a plugin provides it. Generated
 type-only `@buzz/author` declarations are exercised by a source-only external consumer
 fixture in `tests/fixtures/conversation-consumer`; it is built and installed only in
 the browser test's temporary profile.
@@ -2947,6 +3065,14 @@ the host's day dividers re-render at local midnight; a plugin that shows these
 labels in its own long-lived view must call them again when the day changes.
 This remains a host-matched preview, not a stable cross-version SDK. Shared session
 ownership and trusted-plugin authority do not change.
+
+`conversation.ui.MembersDialog` and `.GeneralAccess` reuse the host's sharing
+controls. The type-only author package exports `ChannelMembersDialogProps`,
+`ChannelGeneralAccessProps`, `GeneralAccessPolicy` and `MemberChange`. Plugins
+provide their record's member-change callbacks and access policy; the host's
+member-management authority checks still apply. See
+[Reusing the member picker](plugin-authoring-guide.md#reusing-the-member-picker)
+for the full props and an example.
 
 For a page-owned retained reader, `conversation.ui.ReplyBranch` groups the
 page's own root message and child rows with the native expand/collapse controls
@@ -3208,8 +3334,9 @@ The existing native and browser upload adapters prepare `voice-note-*.wav` files
 as the old Buzz H.264/AAC MP4 envelope. Voice Notes adds no uploader, signer or
 outbox. Files upload on Send, retain the shared progress/recovery behavior, and
 carry bounded duration and waveform metadata through ordinary `imeta` tags.
-Recordings stop at five minutes. Pending files have the same tab-local lifetime
-and limits as other attachment drafts; they do not survive app restart.
+Recordings stop at five minutes. Pending files have the same lifetime and limits
+as other attachment drafts: uploaded files survive app restart with the draft;
+files still uploading do not.
 
 The player loads audio on Play, supports seeking and playback speed, and pauses
 when its conversation is hidden. Existing voice notes are recognized from signed
@@ -3324,6 +3451,31 @@ desktop app are not exercised there.
 ## Desktop browser
 
 Plugins can render the host-provided [`browser.View` component](browser.md) inside a panel. It opens HTTP(S) pages beside the conversation on macOS desktop. The host owns website rendering, navigation controls, and native session cleanup. Remote pages receive no Buzz IPC bridge; plugin JavaScript remains trusted same-process code. The [capability guide](browser.md#try-the-capability-with-a-local-plugin) includes a complete local-plugin example and installation steps.
+
+## GitHub pull request states
+
+While the bundled GitHub plugin is on, it provides `ctx.githubPulls`: the pull
+request states the app already holds, read-only. Links in messages, the panel
+and agents' watches read pull requests; `ctx.githubPulls` never reads GitHub, so
+using it costs nothing against GitHub's limits.
+
+`prState(url, { details })` gives what the agent tool `github_pr_state` gives,
+built by the same code: `state` (`"open"`, `"draft"`, `"merged"` or
+`"closed"`), with a `gh` read also `checks`, `failed`, `settled`, `conflicts`
+and `head`, then `read_at`, `age_seconds`, `source` and, when reading it again
+failed, `last_read_failed`. With `details: true` it adds the panel's `details`
+once something read them. Where the tool would read GitHub, `prState` gives
+undefined instead: the app holds no state for it (not read, could not be read,
+or forgotten after nobody showed it for a while), or `url` is not a pull
+request's. `subscribe(listener)` calls back after a read records a changed
+state, or when `last_read_failed` changes: reading again starts failing, fails
+for another reason, or works again. A read that finds the same state only moves
+`read_at` and `age_seconds` and is not announced, so show freshness from your
+own clock; a state the app forgets is not announced either. The report is a
+copy: changing it changes nothing the app holds.
+The service goes away when the GitHub plugin is turned off, so take it with
+`ctx.inject(["githubPulls"], (child) => …)` rather than a top-level `inject`, which
+would keep the plugin from starting without it.
 
 ## Decisions
 

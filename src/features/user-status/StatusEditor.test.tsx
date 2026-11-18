@@ -421,11 +421,14 @@ it.each([
           screen.getByRole("button", { name: "Choose a status emoji" }),
         );
         const choice = await waitFor(() => {
-          const button = document
-            .querySelector("em-emoji-picker")
-            ?.shadowRoot?.querySelector<HTMLButtonElement>(
-              'button[title="Grinning Face"]',
-            );
+          // The picker's preview replaces button titles; match the glyph.
+          const button = [
+            ...(document
+              .querySelector("em-emoji-picker")
+              ?.shadowRoot?.querySelectorAll<HTMLButtonElement>(
+                "button[aria-label]",
+              ) ?? []),
+          ].find((element) => element.getAttribute("aria-label") === "😀");
           if (!button) throw new Error("Emoji choice has not rendered");
           return button;
         });

@@ -22,7 +22,7 @@ import {
   wakeLands,
 } from "../../features/agent-harness/plugin-wake";
 import type { AgentKey } from "../../features/agents/membership";
-import type { AgentReads } from "../../features/agents/reads";
+import { type AgentReads, workflowMarked } from "../../features/agents/reads";
 import {
   EACH_TURN,
   sessionPrompts,
@@ -45,16 +45,21 @@ import type {
 } from "../../features/agents/service";
 import type { EventData } from "../../features/relay/events";
 import { CREDENTIAL_ENV } from "../../features/host/service";
+import { isRetryableRead } from "../../features/relay/read-retry";
 import { threadReference } from "../../features/relay/thread-reference";
 import type { ChannelLabel } from "../../features/channels/channel-icon";
 import { appClient, readFile } from "../../buzz-mcp/app-client";
+import { readAuthorNames } from "../../features/agent-harness/author-names";
 import { readProject } from "../../features/agent-harness/project";
 import {
   referencedFolders,
   referencedSkills,
 } from "../../features/agent-harness/referenced-folders";
 import { RESUMED_PROMPT } from "../../buzz-mcp/prompt";
-import { MemoryReads } from "../../features/agent-harness/core-memory";
+import {
+  abortable as readUntilAborted,
+  MemoryReads,
+} from "../../features/agent-harness/core-memory";
 import { SessionControls } from "../../features/agent-harness/session-control";
 import type {
   SessionPlace,
@@ -73,13 +78,17 @@ import {
 import {
   config,
   resolveModel,
+  resolveEffort,
   defaults,
   absoluteWorkspace,
   effortName,
   validWorkspace,
   type Config,
 } from "./config";
-import { unsupportedSynced } from "../../features/agents/agent-config";
+import {
+  unsupportedSynced,
+  unverifiedSynced,
+} from "../../features/agents/agent-config";
 import { conversationHistory } from "./history";
 import { buzzHome } from "./setup";
 import {
@@ -93,6 +102,7 @@ import {
 import {
   AppServer,
   listModels,
+  listVoices,
   Refused,
   type Spawn,
   type ToolCall,
@@ -135,6 +145,7 @@ type Request = {
   finalDelivery?: Error | true;
   step?: (tool: string, target?: string) => void;
   acknowledged?: (input?: Readonly<{ steering?: true }>) => void;
+  accepted?: () => void;
   superseded?: () => void;
   /** Takes a title for a new Solo chat; see `Delivery.named`. */
   named?: (title: string) => void;
@@ -198,10 +209,21 @@ type Once = {
   /** Settles once the turn has ended and let go of its thread. */
   released: Promise<void>;
 };
+/** A queued turn that later messages join once it starts. */
+type Next = {
+  began: Promise<Active | undefined>;
+  begin: (active?: Active) => void;
+};
 type Lane = {
   tail: Promise<void>;
   /** Turns waiting on `tail` to start; steering past them would reorder. */
   queued: number;
+  /** The latest of them. */
+  next?: Next;
+  /** Messages behind a turn, each steered or queued in arrival order. */
+  steering: Promise<void>;
+  /** How many of them are still being placed. */
+  behind: number;
   active?: Active;
   voice?: { loaded: Loaded; signal: AbortSignal };
 };
@@ -295,6 +317,9 @@ function textOf(event: EventData, name: string) {
   return text;
 }
 
+/** A turn's run returns once Codex has it, so this bounds only the hand-over. */
+export const HANDOVER_MS = 2 * 60_000;
+
 /** Local agents share one app-server. Each remote session owns its server.
  * Each conversation carries its agent's workspace, instructions and tools.
  * Tool calls find their agent by thread and turn. */
@@ -376,6 +401,13 @@ export class CodexRuntime {
     private readonly handle: (pubkey: string) => AgentHandle | undefined = () =>
       undefined,
     private readonly resolveDirectory?: Host["resolveDirectory"],
+    /** The agent's reads once its community is ready, for a workflow's
+     * mention that arrived while it reconnects; rejects when `signal` aborts. */
+    private readonly readyReads?: (
+      agent: AgentHandle,
+      signal: AbortSignal,
+      channelId: string | undefined,
+    ) => Promise<AgentReads | undefined>,
   ) {}
   /** The folder a plugin gave the conversation, if any. Only the local
    * runtime keeps them; an execution target's conversations refuse one. */
@@ -506,6 +538,10 @@ export class CodexRuntime {
         execution,
         undefined,
         sessionKey,
+        undefined,
+        undefined,
+        undefined,
+        this.readyReads,
       );
       const update = () => {
         this.views.set(
@@ -802,9 +838,7 @@ export class CodexRuntime {
           ({ reasoningEffort: id }) => ({ id, label: effortName(id) }),
         );
         // As a run picks it: the configured effort if the model has it.
-        const effort = efforts.some((level) => level.id === settings.effort)
-          ? settings.effort
-          : row.defaultReasoningEffort;
+        const effort = resolveEffort(row, settings.effort);
         return {
           id: row.model,
           label: row.displayName || row.model,
@@ -1477,7 +1511,12 @@ export class CodexRuntime {
     const { channelId } = seat.conversation;
     const key = JSON.stringify([channelId, "channel"]);
     const entry = this.entry(agent.key, reads.scope);
-    const lane = entry.lanes.get(key) ?? { tail: entry.after, queued: 0 };
+    const lane = entry.lanes.get(key) ?? {
+      tail: entry.after,
+      queued: 0,
+      steering: Promise.resolve(),
+      behind: 0,
+    };
     if (lane.voice)
       throw new Error("This conversation already has a voice seat");
     entry.lanes.set(key, lane);
@@ -1548,6 +1587,26 @@ export class CodexRuntime {
       .then(async () => {
         signal.throwIfAborted();
         const rpc = await server.opening;
+        const voice = settings.voice;
+        if (voice) {
+          signal.throwIfAborted();
+          const voices = await readUntilAborted(
+            listVoices(rpc).catch(() => undefined),
+            signal,
+          );
+          if (!voices)
+            throw new Error(
+              seat.synced?.voice
+                ? unverifiedSynced("voice", voice, "this Codex")
+                : `Couldn't check the selected Codex voice "${voice}". Try again, or change it in Settings.`,
+            );
+          if (!voices.includes(voice))
+            throw new Error(
+              seat.synced?.voice
+                ? unsupportedSynced("voice", voice, "this Codex")
+                : `The selected Codex voice "${voice}" is unavailable. Choose an available voice in Settings.`,
+            );
+        }
         const memory = await this.core(agent.key, signal);
         const instructions =
           Object.values(
@@ -1642,6 +1701,7 @@ export class CodexRuntime {
             realtimeThinking = active;
             thinking();
           },
+          settings.voice,
         );
         signal.throwIfAborted();
         this.save(request, entry, key, {
@@ -1684,7 +1744,18 @@ export class CodexRuntime {
     const wake = trigger.type !== "mention" ? trigger : undefined;
     const event =
       trigger.type !== "mention" ? wakeAnchor(trigger) : trigger.event;
-    const reads = this.reads(agent.key);
+    // A workflow's mention waits out a reconnect; the check below decides.
+    const ready =
+      trigger.type === "mention" && workflowMarked(trigger.event, agent.owner)
+        ? this.readyReads
+        : undefined;
+    const reads = ready
+      ? await ready(agent, delivery.signal, delivery.channelId)
+      : this.reads(agent.key);
+    if (ready) {
+      delivery.signal.throwIfAborted();
+      if (delivery.current && !delivery.current()) return delivery.ignored?.();
+    }
     if (trigger.type === "mention") {
       const authority = await mentionAuthority(
         trigger.event,
@@ -1747,6 +1818,7 @@ export class CodexRuntime {
       const handoff = this.controls.deliver(
         `${agent.key}/${conversationKey}`,
         async (deferred) => {
+          const handover = deferred && AbortSignal.timeout(HANDOVER_MS);
           const admitted = await admission(deferred);
           const runtime = await this.connection(
             agent.key,
@@ -1754,9 +1826,14 @@ export class CodexRuntime {
             conversationKey,
             deferred ? undefined : delivery.signal,
           );
-          const accepted = deferred ? runtime.target?.signal : delivery.signal;
-          if (!accepted)
+          const lifetime = deferred ? runtime.target?.signal : delivery.signal;
+          if (!lifetime)
             throw new Error("The remote Codex lifetime is unavailable");
+          // Held work's deadline passed while it waited, so its hand-over
+          // gets its own from now; the turn itself outlives it.
+          const accepted = handover
+            ? AbortSignal.any([lifetime, handover])
+            : lifetime;
           await runtime.run({
             ...delivery,
             ...(admitted
@@ -1817,6 +1894,7 @@ export class CodexRuntime {
       ...(project ? { project: `${project}\n` } : {}),
       answered,
       failActivity,
+      ...(delivery.accepted ? { accepted: delivery.accepted } : {}),
       ...(delivery.step ? { step: delivery.step } : {}),
       ...(delivery.acknowledged ? { acknowledged: delivery.acknowledged } : {}),
       ...(delivery.superseded ? { superseded: delivery.superseded } : {}),
@@ -1854,18 +1932,22 @@ export class CodexRuntime {
         const text = textOf(request.event, agent.name);
         let lane = entry.lanes.get(key);
         if (!lane) {
-          lane = { tail: entry.after, queued: 0 };
+          lane = {
+            tail: entry.after,
+            queued: 0,
+            steering: Promise.resolve(),
+            behind: 0,
+          };
           entry.lanes.set(key, lane);
         }
-        if (lane.active) {
-          const active = lane.active;
+        if (lane.active || lane.queued || lane.behind) {
+          const current = lane;
           let queued = false;
           const queue = () => {
             queued = true;
-            this.start(request, text, key, lane, entry);
+            this.start(request, text, key, current, entry);
           };
-          // Startup and history reads stay ordered without holding Agents delivery.
-          const accepted = active.steering.then(async () => {
+          const steer = async (active: Active) => {
             try {
               await active.ready;
               if (entry.abort.signal.aborted) {
@@ -1874,14 +1956,14 @@ export class CodexRuntime {
               }
               // Steering cannot carry a model or effort pick, so a
               // differing pick waits for this turn and runs as the next one.
-              // Everything after it queues too until the lane drains: steering
-              // would run later messages first. A turn keeps the posting policy
-              // it was admitted with, so a request under the other policy waits
-              // for it too. A turn the owner stopped takes nothing more.
+              // Messages after it join that turn instead: steering would run
+              // them first. A turn keeps the posting policy it was admitted
+              // with, so a request under the other policy waits for it too. A
+              // turn the owner stopped takes nothing more.
               if (
                 active.finished ||
                 active.stopped ||
-                lane.queued ||
+                current.queued ||
                 request.conversation.topLevel !==
                   active.reply.conversation.topLevel ||
                 (request.model && request.model !== active.model) ||
@@ -1908,6 +1990,7 @@ export class CodexRuntime {
                 request.answered();
                 return;
               }
+              request.accepted?.();
               await active.rpc.request("turn/steer", {
                 threadId: active.threadId,
                 expectedTurnId: active.turnId,
@@ -1925,8 +2008,12 @@ export class CodexRuntime {
                 request.failActivity("Codex was stopped");
                 return;
               }
-              // A completion racing the request means this is the next ordinary turn.
-              if (message(error) === "no active turn to steer") {
+              // A completion racing the request, or a turn that never
+              // started, means this is the next ordinary turn.
+              if (
+                !active.turnId ||
+                message(error) === "no active turn to steer"
+              ) {
                 queue();
                 return;
               }
@@ -1945,8 +2032,27 @@ export class CodexRuntime {
             } finally {
               if (!queued) entry.waiting.delete(request);
             }
-          });
-          active.steering = accepted.catch((error) =>
+          };
+          current.behind++;
+          // Startup and history reads stay ordered without holding Agents delivery.
+          const accepted = current.steering
+            .then(async () => {
+              // Behind a queued turn, a message joins it once it starts, so a
+              // backlog clears in one turn rather than one turn per message.
+              const active = current.queued
+                ? await current.next?.began
+                : current.active;
+              if (!active) return queue();
+              const steered = steer(active);
+              // The turn ends only once what it may take in is placed.
+              active.steering = Promise.all([
+                active.steering,
+                steered.catch(() => {}),
+              ]).then(() => {});
+              await steered;
+            })
+            .finally(() => current.behind--);
+          current.steering = accepted.catch((error) =>
             console.error("Codex steering failed", error),
           );
           return;
@@ -2237,12 +2343,21 @@ export class CodexRuntime {
   ) {
     const current = lane;
     current.queued++;
+    let began!: (active?: Active) => void;
+    const next: Next = {
+      began: new Promise((resolve) => (began = resolve)),
+      begin: (active) => {
+        next.begin = () => {};
+        current.queued--;
+        began(active);
+      },
+    };
+    current.next = next;
     const job = lane.tail
       .catch(() => undefined)
       .then(async () => {
         // A server-started voice turn can arrive after this job was queued.
         while (current.active) await current.active.released;
-        current.queued--;
         entry.waiting.delete(request);
         if (entry.abort.signal.aborted) {
           request.failActivity("Codex was stopped");
@@ -2254,12 +2369,14 @@ export class CodexRuntime {
         }
         try {
           await entry.after;
-          await this.execute(request, text, key, current, entry);
+          await this.execute(request, text, key, current, entry, next);
         } catch (error) {
           request.failActivity(message(error));
           throw error;
         }
-      });
+      })
+      // Messages that joined a turn that never began queue on their own.
+      .finally(() => next.begin());
     lane.tail = job;
     this.status(request.agent.key, key, "Starting");
     // Agents can deliver follow-ups and other conversations immediately.
@@ -2285,17 +2402,27 @@ export class CodexRuntime {
     const reads = this.reads(request.agent.key);
     if (reads?.scope !== request.scope)
       throw new Error("The community changed");
-    // A chat its owner is still creating has nothing earlier to read.
-    const starting = (await reads.channel(request.conversation.channelId))
-      ?.starting;
-    return conversationHistory(
-      request.event,
-      request.conversation,
-      (filters) =>
-        starting ? Promise.resolve([]) : reads.read(filters, signal),
-      reads,
-      reads.workflowAuthority(),
-    );
+    try {
+      // A chat its owner is still creating has nothing earlier to read.
+      const starting = (await reads.channel(request.conversation.channelId))
+        ?.starting;
+      return await conversationHistory(
+        request.event,
+        request.conversation,
+        (filters) =>
+          starting ? Promise.resolve([]) : reads.read(filters, signal),
+        reads,
+        reads.workflowAuthority(),
+      );
+    } catch (error) {
+      // The relay session already retried; a slow relay costs the turn its
+      // earlier messages, not the turn itself.
+      if (signal.aborted || !isRetryableRead(error)) throw error;
+      console.warn("Codex could not read the conversation", error);
+      // Without history, the turn still names who asked.
+      await readAuthorNames(reads, [request.event]);
+      return "";
+    }
   }
   // Tags the owner even when a sibling asked: tagging the sibling would wake
   // it, and two agents failing alike would wake each other without end.
@@ -2353,6 +2480,10 @@ export class CodexRuntime {
       // Its tool registry reviews every call, Buzz's dynamic tools included.
       ...(!this.target ? { nativeCall: check } : {}),
       nativeToolGate: true,
+      // Execution-target reads come from somewhere other than this desktop;
+      // suppress managed-attachment hints at publish so a remote source cannot
+      // trigger local managed cleanup. No remote deletion is added.
+      localAttachments: !this.target,
       protectionContext: async () => {
         const rpc =
           active?.rpc ??
@@ -2615,14 +2746,8 @@ export class CodexRuntime {
         "The selected Codex model is unavailable. Choose an available model in Settings.",
       );
     const model = selected.model;
-    const supported = selected.supportedReasoningEfforts.map(
-      (level) => level.reasoningEffort,
-    );
     // A picked model may not support the configured effort.
-    const effort =
-      [pick.effort, settings.effort].find(
-        (level) => level && supported.includes(level),
-      ) ?? selected.defaultReasoningEffort;
+    const effort = resolveEffort(selected, pick.effort, settings.effort);
     // A synced effort is the agent's on every device: never run another.
     const kept = synced?.effort;
     if (kept && !pick.model && !pick.effort && effort !== kept)
@@ -2843,6 +2968,7 @@ export class CodexRuntime {
     key: string,
     lane: Lane,
     entry: Entry,
+    next?: Next,
   ) {
     const { adopted } = request;
     let ready!: () => void;
@@ -2879,6 +3005,7 @@ export class CodexRuntime {
     };
     void active.ready.catch(() => undefined);
     lane.active = active;
+    next?.begin(active);
     const { settings, agent } = request;
     const followed = follow(server.rpc, signal, active, (method, item) => {
       const step = method === "item/started" ? codexStep(item) : undefined;
@@ -2963,6 +3090,23 @@ export class CodexRuntime {
             at: Date.now(),
             ...(tools ? { tools } : {}),
           });
+        if (signal.aborted || (request.current && !request.current())) {
+          if (this.target && !resuming) {
+            // An empty remote thread has no rollout to resume on the next request.
+            const { [key]: _, ...kept } = entry.saved;
+            await this.storage.set(entry.storageKey, JSON.stringify(kept));
+            entry.saved = kept;
+          }
+          signal.throwIfAborted();
+          restoreNotes(request);
+          request.answered();
+          this.status(agent.key, key, "Idle");
+          active.finished = true;
+          ready();
+          return;
+        }
+        signal.throwIfAborted();
+        request.accepted?.();
         const turn = await rpc
           .request<{ turn: { id: string } }>("turn/start", {
             threadId: active.threadId,

@@ -72,17 +72,17 @@ vi.mock("../plugins/modules", async (original) => {
   };
 });
 // Counts the sidebar inventory's renders.
-const soloRenders = vi.hoisted(() => ({ count: 0 }));
-vi.mock("../features/channel-navigation/SoloInventory", async (original) => {
+const inventoryRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../bundled/channels/ChannelInventory", async (original) => {
   const actual =
-    await original<
-      typeof import("../features/channel-navigation/SoloInventory")
-    >();
+    await original<typeof import("../bundled/channels/ChannelInventory")>();
   return {
     ...actual,
-    SoloInventory: (props: Parameters<typeof actual.SoloInventory>[0]) => {
-      soloRenders.count++;
-      return <actual.SoloInventory {...props} />;
+    ChannelInventory: (
+      props: Parameters<typeof actual.ChannelInventory>[0],
+    ) => {
+      inventoryRenders.count++;
+      return <actual.ChannelInventory {...props} />;
     },
   };
 });
@@ -227,6 +227,25 @@ it("keeps an OS entity intent through real community selection and Retry in App"
     ingress: true,
     retryable: true,
   });
+  // Join a community opens in place: a join visit would replace the failed
+  // link and its Retry.
+  const failed = current.navigation.snapshot().entry;
+  await userEvent.click(
+    screen.getByRole("button", { name: /^Community switcher:/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Join a community" }),
+  );
+  const joining = await screen.findByRole("dialog", {
+    name: "Join a community",
+  });
+  expect(current.navigation.snapshot()).toMatchObject({
+    ingress: true,
+    retryable: true,
+    entry: failed,
+  });
+  await userEvent.click(within(joining).getByRole("button", { name: "Close" }));
+  expect(current.navigation.snapshot().ingress).toBe(true);
   await userEvent.click(
     screen.getByRole("button", { name: /^Community switcher:/ }),
   );
@@ -341,8 +360,7 @@ it("opens Inbox for a malformed launch link when the catalog settles after the c
     }),
   );
   expect(current.plugins.startup()).toBe("loading");
-  release();
-  await screen.findByRole("dialog", { name: "This link doesn’t work" });
+  await act(async () => release());
   await waitFor(() =>
     expect(current.navigation.snapshot()).toMatchObject({
       status: "opened",
@@ -356,6 +374,7 @@ it("opens Inbox for a malformed launch link when the catalog settles after the c
       },
     }),
   );
+  await screen.findByRole("dialog", { name: "This link doesn’t work" });
 });
 
 it("opens Inbox for a malformed launch link when Inbox activates last", async () => {
@@ -885,7 +904,7 @@ it("opens and closes a thread without rendering the sidebar", async () => {
   await waitFor(() =>
     expect(current.navigation.snapshot().status).toBe("opened"),
   );
-  await waitFor(() => expect(soloRenders.count).toBeGreaterThan(0));
+  await waitFor(() => expect(inventoryRenders.count).toBeGreaterThan(0));
   const opened = (entry: string) =>
     waitFor(() =>
       expect(current.navigation.snapshot()).toMatchObject({
@@ -895,7 +914,7 @@ it("opens and closes a thread without rendering the sidebar", async () => {
     );
   // Let the sidebar settle before counting.
   await act(async () => {});
-  const settled = soloRenders.count;
+  const settled = inventoryRenders.count;
   const start = current.navigation.snapshot().entry.id;
   act(() => {
     void current.navigation.open({
@@ -910,12 +929,12 @@ it("opens and closes a thread without rendering the sidebar", async () => {
   await opened(thread);
   act(() => current.navigation.back());
   await opened(start);
-  expect(soloRenders.count).toBe(settled);
+  expect(inventoryRenders.count).toBe(settled);
   // Another conversation is a destination, which the sidebar shows.
   act(() => {
     void current.navigation.open({ ...alpha, channelId: "beta" });
   });
-  await waitFor(() => expect(soloRenders.count).toBeGreaterThan(settled));
+  await waitFor(() => expect(inventoryRenders.count).toBeGreaterThan(settled));
 });
 it("offers to join a code-less link's community, or opens it once joined", async () => {
   const queue = [
@@ -945,7 +964,7 @@ it("offers to join a code-less link's community, or opens it once joined", async
   );
   expect(current.communities.snapshot().selected).toBe(origin);
   // The latest link replaces the unjoined community's dialog.
-  expect(current.invites.snapshot()).toBeUndefined();
+  expect(current.navigation.snapshot().entry.target.join).toBeUndefined();
   await waitFor(() =>
     expect(screen.queryByLabelText("Community URL")).not.toBeInTheDocument(),
   );
@@ -1094,11 +1113,9 @@ it("lists active primary pages in the app dock", async () => {
   // Disabling optional pages removes their entries without hiding Messages.
   for (const id of ["buzz.inbox", "buzz.bestie", "buzz.repos"])
     await act(() => current.plugins.change("disable", id));
+  // Without sidebar pages, the sidebar lists no empty Plugins section.
   expect(
-    within(screen.getByRole("navigation", { name: "Pages" })).queryByRole(
-      "button",
-      { name: "Activity" },
-    ),
+    screen.queryByRole("navigation", { name: "Pages" }),
   ).not.toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "Bestie" })).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Messages" })).toBeInTheDocument();

@@ -44,6 +44,7 @@ import {
 import {
   CheckCircleIcon,
   CopyIcon,
+  RobotIcon,
 } from "../../shared/design-system/icons/index";
 import { Avatar } from "../../shared/design-system/ui/Avatar";
 import { AgentAvatar } from "../../features/agents/AgentAvatar";
@@ -585,13 +586,9 @@ function ProfileDetails({
     viewer,
     agent: displayAgent,
     enabled: !!scoped,
-    onOpened(channelId) {
-      void scoped?.navigation.open({
-        version: 1,
-        kind: "conversation",
-        channelId,
-        scope: scoped.scope,
-      });
+    onOpened(link) {
+      const target = scoped && buzzLinkTarget(link, scoped.scope);
+      if (target) void scoped.navigation.open(target);
     },
   });
   const canEdit = !!scoped && viewer === pubkey;
@@ -635,7 +632,10 @@ function ProfileDetails({
             />
           </div>
           <div className={styles.identity}>
-            <h2 className="text-body-lg">{name}</h2>
+            <h2 className="text-body-lg">
+              {displayAgent && <RobotIcon className={styles.agentIcon} />}
+              {name}
+            </h2>
             {profile?.verified && (
               <p
                 className={`${styles.verifiedName} text-body-sm text-secondary`}
@@ -661,7 +661,7 @@ function ProfileDetails({
             {presence !== "unknown" && (
               <p className="text-body-sm text-primary">
                 {
-                  { online: "Active", away: "Away", offline: "Offline" }[
+                  { online: "Online", away: "Away", offline: "Offline" }[
                     presence
                   ]
                 }

@@ -966,6 +966,99 @@ it("groups unread thread activity by same-channel root and clears one item witho
   });
 });
 
+const imeta = (url: string, mime: string) => [
+  "imeta",
+  `url ${url}`,
+  `m ${mime}`,
+];
+
+it.each([
+  ["", [imeta("https://example.test/a.png", "image/png")], "Image"],
+  [
+    "![photo](https://example.test/a.png)",
+    [imeta("https://example.test/a.png", "image/png")],
+    "Image",
+  ],
+  [
+    "![one](https://example.test/a.png)\n\n![two](https://example.test/b.png)",
+    [],
+    "2 images",
+  ],
+  [
+    "",
+    [
+      imeta("https://example.test/a.mp4", "video/mp4"),
+      imeta("https://example.test/b.mp4", "video/mp4"),
+    ],
+    "2 videos",
+  ],
+  [
+    "",
+    [
+      imeta("https://example.test/a.png", "image/png"),
+      imeta("https://example.test/b.mp4", "video/mp4"),
+    ],
+    "2 attachments",
+  ],
+  [
+    "A caption\n\n![photo](https://example.test/a.png)",
+    [imeta("https://example.test/a.png", "image/png")],
+    "A caption",
+  ],
+] as const)(
+  "activity and Inbox previews describe attachment-only messages: %j %j",
+  (content, media, preview) => {
+    const h = setup();
+    h.grant("room");
+    const root = message(h.viewer, "room", "root", 10);
+    const reply = message(h.alice, "room", content, 11, [
+      ["e", root.id, "", "reply"],
+      ...media.map((tag) => [...tag]),
+    ]);
+    const mention = message(h.alice, "room", content, 12, [
+      ["p", h.viewer.pubkey],
+      ...media.map((tag) => [...tag]),
+    ]);
+    h.emit([root, reply, mention]);
+    expect(h.session.unread.activity("room").items?.[0]?.preview).toBe(preview);
+    expect(
+      h.session.unread
+        .inbox()
+        .items.find((item) => item.previewMessageId === mention.id)?.preview,
+    ).toBe(preview);
+  },
+);
+
+it("activity attachment labels follow edits and notify preview subscribers", () => {
+  const h = setup();
+  h.grant("room");
+  const root = message(h.viewer, "room", "root", 10);
+  const reply = message(
+    h.alice,
+    "room",
+    "A caption\n\n![photo](https://example.test/a.png)",
+    11,
+    [["e", root.id, "", "reply"]],
+  );
+  h.emit([root, reply]);
+  expect(h.session.unread.activity("room").items?.[0]?.preview).toBe(
+    "A caption",
+  );
+  const changes: ThreadActivitySnapshot[] = [];
+  h.session.unread.subscribeActivity("room", () =>
+    changes.push(h.session.unread.activity("room")),
+  );
+  h.emit([
+    signed(h.alice, {
+      kind: 40003,
+      content:
+        "![one](https://example.test/a.png)\n\n![two](https://example.test/b.png)",
+      tags: [["e", reply.id]],
+    }),
+  ]);
+  expect(changes.at(-1)?.items?.[0]?.preview).toBe("2 images");
+});
+
 it("activity previews use edited and unwrapped current message content and notify subscribers", () => {
   const h = setup();
   h.grant("room");
@@ -3976,6 +4069,36 @@ it.each(["channel", "thread"] as const)(
   },
 );
 
+it("judges a reply's unread as of an earlier thread read time, keeping its individual marks", async () => {
+  const h = setup();
+  h.grant("room");
+  const root = message(h.viewer, "room", "root", 11);
+  const first = message(h.alice, "room", "first", 12, [
+    ["e", root.id, "", "reply"],
+  ]);
+  const second = message(h.alice, "room", "second", 13, [
+    ["e", root.id, "", "reply"],
+  ]);
+  h.emit([root, first, second]);
+  const thread = {
+    kind: "thread" as const,
+    channelId: "room",
+    rootId: root.id,
+  };
+  const reading = h.session.unread.reading("room", root.id);
+  await reading.observe([first.id]);
+  reading.dispose();
+  const before = h.session.unread.threadReadThrough("room", root.id);
+  await h.session.unread.markThrough(thread, second.id);
+  const unread = (id: string, through?: number) =>
+    h.session.unread.attention("room", id, through).unread;
+  expect([unread(first.id), unread(second.id)]).toEqual([false, false]);
+  // As of the earlier time, the reply read on its own stays read.
+  expect([unread(first.id, before), unread(second.id, before)]).toEqual([
+    false,
+    true,
+  ]);
+});
 it("thread bottom catch-up clears only its thread and preserves local and remote manual intent", async () => {
   const h = setup();
   h.grant("room");
@@ -3996,10 +4119,14 @@ it("thread bottom catch-up clears only its thread and preserves local and remote
   };
   await h.session.unread.markUnreadLocal(thread);
   const lease = h.session.unread.reading("room");
+  expect(h.session.unread.threadReadThrough("room", root.id)).toBeLessThan(11);
   await lease.catchUp(reply.id, root.id);
   expect(h.journal()?.state.frontiers).toEqual({
     [`thread-activity:${root.id}`]: 13,
   });
+  // Every reply through the catch-up is read; the other thread is not.
+  expect(h.session.unread.threadReadThrough("room", root.id)).toBe(13);
+  expect(h.session.unread.threadReadThrough("room", other.id)).toBeLessThan(12);
   expect(h.session.unread.snapshot(thread)).toMatchObject({
     observedCount: 0,
     manual: "local-only",

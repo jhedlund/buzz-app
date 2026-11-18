@@ -1387,6 +1387,23 @@ describe("Mod+Shift+V pastes plain text verbatim", () => {
   });
 });
 
+it("does not spellcheck a mention, as a chip or opened as text", () => {
+  const h = mount();
+  const honey = { pubkey: "a".repeat(64), name: "Honey" };
+  act(() => h.input.insertText("", honey));
+  expect(h.input.querySelector('[data-source="@Honey"]')).toHaveAttribute(
+    "spellcheck",
+    "false",
+  );
+  act(() => h.input.setSelectionRange(2, 2));
+  expect(h.input.querySelector('[data-source="@Honey"]')).toBeNull();
+  const text = [...h.input.querySelectorAll("span")].find(
+    (span) => span.textContent === "@Honey",
+  );
+  expect(text).toHaveAttribute("spellcheck", "false");
+  expect(h.draft().recipients).toEqual([{ ...honey, start: 0, end: 6 }]);
+});
+
 it("bolds a mention typed between delimiters and keeps its chip and recipient", async () => {
   const h = mount();
   const honey = { pubkey: "a".repeat(64), name: "Honey" };
@@ -4924,6 +4941,42 @@ describe("oversized paste feedback", () => {
 });
 
 describe("quoting timeline content", () => {
+  it("adds attribution above the quote and leaves a blank reply line in the same undo step", async () => {
+    const h = mount("Draft");
+    const link = `buzz://message?channel=general&id=${"a".repeat(64)}`;
+    act(() =>
+      expect(
+        h.input.insertQuote(timelineHtml("Hello <strong>world</strong>"), [
+          link,
+        ]),
+      ).toBe(true),
+    );
+    expect(h.markdown()).toBe(
+      `Draft\n\nFrom ${link}:\n\n> Hello **world**\n\n\n`,
+    );
+    await h.user.keyboard("reply");
+    expect(h.markdown()).toBe(
+      `Draft\n\nFrom ${link}:\n\n> Hello **world**\n\n\nreply`,
+    );
+    act(() => h.input.undo(false));
+    expect(h.markdown()).toBe(
+      `Draft\n\nFrom ${link}:\n\n> Hello **world**\n\n\n`,
+    );
+    act(() => h.input.undo(false));
+    expect(h.markdown()).toBe("Draft");
+  });
+
+  it("counts source links toward the limit without changing the existing draft", () => {
+    const onPasteTooLong = vi.fn();
+    const h = mount("keep", { maxLength: 20, onPasteTooLong });
+    const link = `buzz://message?channel=general&id=${"a".repeat(64)}`;
+    act(() =>
+      expect(h.input.insertQuote(timelineHtml("short"), [link])).toBe(false),
+    );
+    expect(h.markdown()).toBe("keep");
+    expect(onPasteTooLong).toHaveBeenCalledOnce();
+  });
+
   it("replaces an empty draft's line and continues below the quote", async () => {
     const h = mount();
     act(() =>

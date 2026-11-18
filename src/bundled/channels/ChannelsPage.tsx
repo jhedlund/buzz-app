@@ -26,6 +26,7 @@ import { useReturnHighlight } from "../../features/messages/use-return-highlight
 import { useMessageOpening } from "../../features/messages/use-message-opening";
 import { ChannelBody } from "./ChannelBody";
 import {
+  type ConversationTab,
   entryPane,
   panelTabId,
   rootOfTab,
@@ -36,6 +37,7 @@ import { ChannelMembersDialog } from "./ChannelMembersDialog";
 import { ChannelHeaderIdentity, memberAccess } from "./ChannelHeaderIdentity";
 import {
   matchesConversation,
+  newMessage,
   openEmptyChannels,
   soloDraft,
   soloDraftTarget,
@@ -57,12 +59,11 @@ import { IconButton } from "../../shared/design-system/ui/IconButton";
 import { ChannelHeaderMenu } from "./ChannelHeaderMenu";
 import { ChannelSettingsPanel } from "./ChannelSettingsPanel";
 import { ChannelJoinNotice } from "../../features/messages/ChannelJoinNotice";
+import { ChannelStateNotice, ChannelStateRegion } from "./ChannelStateNotice";
 import {
-  ArchivedChannelNotice,
-  ChannelStateNotice,
-  ChannelStateRegion,
-} from "./ChannelStateNotice";
-import { ChannelLifecycleActions } from "./ChannelLifecycleActions";
+  ChannelLifecycleActions,
+  ChannelUnarchiveButton,
+} from "./ChannelLifecycleActions";
 import { lifecycleNoun } from "./ChannelLifecycleDialog";
 import type { PageNavigation } from "../../features/navigation/service";
 import type { Navigation } from "../../features/navigation/controller";
@@ -381,9 +382,11 @@ function ChannelWorkspace({
   archive?: ArchiveShortcut | undefined;
   read?: ReadShortcut | undefined;
 }) {
-  const composingMessage =
-    navigation?.target.kind === "page" &&
-    navigation.target.route?.params === "new-message";
+  const messageDraft =
+    navigation?.target.kind === "page"
+      ? newMessage(navigation.target.route?.params)
+      : undefined;
+  const composingMessage = messageDraft !== undefined;
   const draftTarget = navigation?.target;
   const draft = useMemo(
     () =>
@@ -936,8 +939,29 @@ function ChannelWorkspace({
       },
     });
   };
+  const mute = handoff?.session === queries ? handoff.mute : undefined;
+  // `/mute` toggles the same optimistic sidebar mute as the row menu, which
+  // owns failure recovery.
+  const toggleMute = (channel: ChannelSummary) => {
+    if (!mute || !queries.sidebarPreferences.muteWritable || channel.cached)
+      throw new Error("You can’t mute this conversation here.");
+    if (!preferences.data)
+      throw new Error("Mute settings aren’t loaded yet. Try /mute again.");
+    const intent = mute.intents.get(channel.id);
+    const muted = intent?.pending
+      ? intent.muted
+      : preferences.data.muted.includes(channel.id);
+    // Confirmed only once saved; a failed save shows the failure notice alone.
+    mute.change(channel.id, channel.name, !muted, () =>
+      notify(`${muted ? "Unmuted" : "Muted"} ${channel.name}`, "success"),
+    );
+    return true;
+  };
   const handleCommand = (command: string, signal: AbortSignal) => {
-    if (command.toLowerCase() !== "/leave" || !current || solo) return false;
+    if (!current || solo) return false;
+    const name = command.toLowerCase();
+    if (name === "/mute") return toggleMute(current);
+    if (name !== "/leave") return false;
     return (async () => {
       const permissions = await queries.channelLifecycle.load(
         current.id,
@@ -2010,6 +2034,16 @@ function ChannelWorkspace({
   const hasPanel = companion || hasChannelPanel;
   const showingChannelPanel = tabState.paneOpen && hasChannelPanel;
   const showingPanel = companion || showingChannelPanel;
+  const highlightedThread =
+    showingChannelPanel && !companion
+      ? tabState.tabs.find(
+          (tab): tab is Extract<ConversationTab, { kind: "thread" }> =>
+            tab.kind === "thread" &&
+            tabPane(tab) === "side" &&
+            tab.id === selectedTab &&
+            tab.channelId === currentId,
+        )
+      : undefined;
   // A plain channel visit reads its visible selected thread along with the
   // conversation that holds focus. A link to a message or thread, passive
   // restoration and another channel’s retained tab do not.
@@ -2173,7 +2207,6 @@ function ChannelWorkspace({
   // Delete all drop the channel from the roster alike.
   const removedTitle =
     removed && `You’re no longer a member of ${removed.label}`;
-  const archivedChannel = current?.archived && !solo ? current : undefined;
   const stateNotice = removedTitle ? (
     <ChannelStateNotice title={removedTitle}>
       <Button
@@ -2185,12 +2218,6 @@ function ChannelWorkspace({
         Back to channels
       </Button>
     </ChannelStateNotice>
-  ) : archivedChannel ? (
-    <ArchivedChannelNotice
-      channel={archivedChannel}
-      session={queries}
-      unarchive={(trigger) => unarchive(archivedChannel, trigger)}
-    />
   ) : undefined;
   // A focused composer that archiving removes hands focus to the history.
   const focusArchivedHistory = useCallback(() => {
@@ -2284,6 +2311,10 @@ function ChannelWorkspace({
     (current.archived ||
       (current.readOnly &&
         (!current.cached || current.viewerRole === "guest")));
+  const archivedMessage =
+    current?.readOnly && !current.cached && current.viewerRole !== "guest"
+      ? "This channel is archived and read-only."
+      : "This channel is archived. It's read-only and hidden from your sidebar.";
   useChannelHistoryFocus(
     historyContainer,
     navigation,
@@ -2296,7 +2327,13 @@ function ChannelWorkspace({
   // The conversation: full width for Solo, or the first main-pane tab.
   const body = (
     <div className={styles.conversationBody}>
-      <ChannelStateRegion>{stateNotice}</ChannelStateRegion>
+      {/* The pill mounts with its text, so announce changes in the existing status. */}
+      <ChannelStateRegion>
+        {stateNotice ??
+          (current?.archived && !solo && (
+            <span className="sr-only">{archivedMessage}</span>
+          ))}
+      </ChannelStateRegion>
       <MessageManagementStatus />
       <section
         data-channel-history
@@ -2326,6 +2363,9 @@ function ChannelWorkspace({
             }
             holding={contextHolding}
             inlineTarget={contextTarget}
+            openThreadRootId={
+              highlightedThread ? rootOfTab(highlightedThread) : undefined
+            }
             onOpenThread={openThread}
             revealMessageId={
               sent?.channelId === current.id ? sent.id : undefined
@@ -2347,8 +2387,10 @@ function ChannelWorkspace({
           <ChannelJoinNotice
             key={`join:${current.id}`}
             ready={contentReadyChannel === current.id}
+            showArchivedWhileLoading={!solo}
             channelId={current.id}
             archived={!!current.archived}
+            archivedMessage={!solo ? archivedMessage : undefined}
             place={solo ? "chat" : "channel"}
             guest={current.viewerRole === "guest"}
             joinRole={current.joinRole}
@@ -2362,7 +2404,15 @@ function ChannelWorkspace({
             }
             onJoin={() => setJoiningChannel(current.id)}
             onHeightChange={setJoinNoticeHeight}
-          />
+          >
+            {current.archived && !solo && handoff && (
+              <ChannelUnarchiveButton
+                channel={current}
+                session={queries}
+                unarchive={(trigger) => unarchive(current, trigger)}
+              />
+            )}
+          </ChannelJoinNotice>
         )}
       </section>
       {!cached && (
@@ -2424,7 +2474,7 @@ function ChannelWorkspace({
             workspace={
               filed && fresh
                 ? {
-                    preferences: queries.soloPreferences,
+                    preferences: queries.sidebarPreferences,
                     choose: (id) =>
                       void filed
                         .file(id || undefined)
@@ -2472,11 +2522,7 @@ function ChannelWorkspace({
           canOpenLink={canOpenLink}
           {...(agents ? { agents } : {})}
           onOpenLink={(url, returnFocus) => openLink(url, { returnFocus })}
-          onOpenConversation={
-            navigator && viewer
-              ? (id) => openLink(`buzz://channel/${encodeURIComponent(id)}`)
-              : undefined
-          }
+          onOpenMessage={navigator && viewer ? openLink : undefined}
         />
       )}
       <Panel
@@ -2512,6 +2558,8 @@ function ChannelWorkspace({
         >
           {composingMessage ? (
             <LiveNewMessage
+              intent={messageDraft?.intent}
+              workspace={messageDraft?.workspace}
               host={{ relay, panels, navigation: navigator }}
               session={queries}
               scope={scope}
@@ -2672,7 +2720,7 @@ function ChannelWorkspace({
                           startChat={
                             navigator &&
                             current &&
-                            canStartLinkedChat(queries, current.id) ? (
+                            canStartLinkedChat(queries) ? (
                               <StartLinkedChat
                                 session={queries}
                                 navigation={navigator}

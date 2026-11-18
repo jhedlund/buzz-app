@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type { RelaySession } from "../../features/relay/session";
+import { rowUnread } from "../../features/relay/unread";
 import styles from "./Channels.module.css";
 
 type UnreadSnapshot = ReturnType<RelaySession["unread"]["snapshot"]>;
@@ -74,8 +75,7 @@ export function useUnreadState(
   const muted = useConfirmedMute(session, channelId);
   const { observedCount: count, attentionCount } = shown(snapshot);
   const manual = snapshot.manual !== "none";
-  const unread =
-    manual || ((count ?? 0) > 0 && (dm || !muted || (attentionCount ?? 0) > 0));
+  const unread = rowUnread(snapshot, dm, muted);
   const ordinary = ordinaryUnread(snapshot, dm, muted);
   const threadCount = snapshot.row?.threadCount ?? activity.items?.length ?? 0;
   return {
@@ -218,7 +218,7 @@ export function UnreadOptions({
             run(session.unread.markUnreadLocal({ kind: "channel", channelId }))
           }
         >
-          Mark unread on this device
+          Mark as unread on this device
         </Button>
       )}
       {channelId && sync.capability === "frontier-sync" && (
@@ -239,7 +239,7 @@ export function UnreadOptions({
             else setError("Load a verified message before marking through it.");
           }}
         >
-          Mark read through loaded messages
+          Mark as read through loaded messages
         </Button>
       )}
       {error && <p role="alert">{error}</p>}

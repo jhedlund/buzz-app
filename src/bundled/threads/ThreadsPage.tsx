@@ -11,7 +11,7 @@ import {
   CheckCircleFilledIcon,
   CheckCircleIcon,
   ChecksIcon,
-  MessageReplyIcon,
+  ThreadIcon,
   PencilSimpleIcon,
   PinFilledIcon,
   PinIcon,
@@ -112,10 +112,7 @@ function Header({ onRefresh }: { onRefresh?: () => void }) {
   return (
     <PanelHeader
       title={
-        <PanelHeaderLabel
-          title="Threads"
-          icon={<MessageReplyIcon size="1rem" />}
-        />
+        <PanelHeaderLabel title="Threads" icon={<ThreadIcon size="1rem" />} />
       }
       actions={
         onRefresh && (
@@ -636,7 +633,7 @@ export function ThreadsView({
             >
               {!rows || awaitingMarks ? null : sorted.length === 0 ? (
                 <EmptyState
-                  icon={<MessageReplyIcon size={24} />}
+                  icon={<ThreadIcon size={24} />}
                   title={
                     rows.length ? "No named threads here" : "No named threads"
                   }
