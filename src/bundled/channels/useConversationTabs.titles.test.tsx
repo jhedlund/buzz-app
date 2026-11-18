@@ -309,6 +309,31 @@ it("a failed rename's Retry does nothing once titles are off or the tab was rena
   expect(h.localName()).toBeFalsy();
 });
 
+it("a rejected name leaves a pending rename's rollback in place", async () => {
+  let reject: (cause: Error) => void = () => {};
+  const publish = vi.fn(
+    (_event: RelayEvent) =>
+      new Promise<unknown>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const h = await harness({ title: "Launch plan", publish });
+  await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));
+  act(() => h.item()?.rename?.("Ship plan"));
+  await waitFor(() => expect(publish).toHaveBeenCalledOnce());
+  act(() => h.item()?.rename?.("x".repeat(513)));
+  expect(toasts.notify).toHaveBeenCalledWith(
+    "Titles can be at most 512 bytes.",
+    "error",
+  );
+  expect(h.item()?.label).toBe("Ship plan");
+  act(() => reject(new Error("relay unavailable")));
+  await waitFor(() => expect(toasts.notify).toHaveBeenCalledTimes(2));
+  expect(toasts.notify.mock.calls[1]?.[2]?.label).toBe("Retry");
+  expect(h.localName()).toBeFalsy();
+  expect(h.item()?.label).toBe("Launch plan");
+});
+
 it("a name over the byte limit says so and changes nothing", async () => {
   const h = await harness({ title: "Launch plan" });
   await waitFor(() => expect(h.item()?.label).toBe("Launch plan"));

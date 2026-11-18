@@ -813,14 +813,17 @@ export function useConversationTabs({
   // write drops it, so it can't hide the shared title, and says so. A blank
   // name only drops the local one.
   function renameThread(tab: Extract<Tab, { kind: "thread" }>, name: string) {
-    // Any rename, local or shared, retires an earlier rename's pending Retry.
+    // Any accepted rename, local or shared, retires an earlier rename's
+    // pending outcome and Retry; a rejected one leaves them alone.
     const bump = () => {
       const id = (renames.current.get(tab.id) ?? 0) + 1;
       renames.current.set(tab.id, id);
       return id;
     };
-    bump();
-    if (!threadTitlesEnabled()) return tabState.renameTab(tab.id, name);
+    if (!threadTitlesEnabled()) {
+      bump();
+      return tabState.renameTab(tab.id, name);
+    }
     const rootId = rootOfTab(tab);
     const read = queries.snapshotRead;
     const writer = queries.configArtifactWriter;
@@ -831,8 +834,10 @@ export function useConversationTabs({
       notify(cause instanceof Error ? cause.message : String(cause), "error");
       return;
     }
-    if (!desired) return tabState.renameTab(tab.id, "");
-    if (!read || !writer) return tabState.renameTab(tab.id, desired);
+    if (!desired || !read || !writer) {
+      bump();
+      return tabState.renameTab(tab.id, desired ?? "");
+    }
     const store = threadTitleStore(queries);
     // Retry writes against the revision this rename was typed over, so it
     // can never replace a title someone else set meanwhile.
